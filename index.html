@@ -87,11 +87,10 @@
     </div>
 
     <div id="auth-section">
-        <a href="http://178.174.173.247:801/login">
-            <img src="https://web.ccpgamescdn.com/eveonlineassets/developers/eve-sso-login-black-small.png"
-                 class="sso-button-img"
-                 alt="Log in with EVE Online">
-        </a>
+        <img src="https://web.ccpgamescdn.com/eveonlineassets/developers/eve-sso-login-black-small.png" 
+             class="sso-button-img" 
+             alt="Log in with EVE Online"
+             onclick="startPkceLogin()">
     </div>
 
     <table>
@@ -109,6 +108,65 @@
     </table>
 
     <script>
+        const clientId = 'ee7a29969a1547d28da9cb148b79c3e7'; // It is 100% safe to have this public!
+        const redirectUri = 'https://emabe390.github.io/SlideContracting/';
+        const scope = 'esi-ui.open_window.v1';
+
+        // --- PKCE CRYPTOGRAPHY FUNCTIONS ---
+        function generateRandomString(length) {
+            const validChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+            let array = new Uint8Array(length);
+            window.crypto.getRandomValues(array);
+            return Array.from(array, x => validChars[x % validChars.length]).join('');
+        }
+
+        async function generateCodeChallenge(verifier) {
+            const data = new TextEncoder().encode(verifier);
+            const digest = await window.crypto.subtle.digest('SHA-256', data);
+            return btoa(String.fromCharCode(...new Uint8Array(digest)))
+                .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        async function startPkceLogin() {
+            const verifier = generateRandomString(64);
+            localStorage.setItem('pkce_verifier', verifier); // Save temporarily in browser
+            const challenge = await generateCodeChallenge(verifier);
+            
+            const loginUrl = `https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&client_id=${clientId}&scope=${scope}&code_challenge=${challenge}&code_challenge_method=S256`;
+            window.location.href = loginUrl; // Redirect to CCP
+        }
+
+        // --- LOGIN CALLBACK HANDLER ---
+        const urlParams = new URLSearchParams(window.location.search);
+        const authCode = urlParams.get('code');
+        let userToken = urlParams.get('token'); 
+
+        // If CCP just sent us back with an auth code, exchange it for a token!
+        if (authCode) {
+            const verifier = localStorage.getItem('pkce_verifier');
+            
+            fetch('https://login.eveonline.com/v2/oauth/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({
+                    grant_type: 'authorization_code',
+                    client_id: clientId,
+                    code: authCode,
+                    code_verifier: verifier
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.access_token) {
+                    // Clean up the URL and reload the page with the active token
+                    window.location.replace(`${redirectUri}?token=${data.access_token}`);
+                } else {
+                    alert("Authentication failed.");
+                }
+            })
+            .catch(err => console.error("Token exchange failed:", err));
+        }
+        
         const urlParams = new URLSearchParams(window.location.search);
         const userToken = urlParams.get('token');
 
