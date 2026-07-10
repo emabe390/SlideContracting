@@ -2,47 +2,19 @@ import asyncio
 import sqlite3
 import requests
 import traceback
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, RedirectResponse
-import urllib.parse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 import json
 import subprocess
-
-app = FastAPI()
-
-app.mount("/static", StaticFiles(directory="img"), name="static")
-
-# --- CORS CONFIGURATION ---
-# Replace this with your actual GitHub Pages URL so only your site can access it
-origins = [
-    "https://emabe390.github.io", 
-    "http://localhost:8000", # Good for local testing
-    "http://localhost:801",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # Change to origins list above later if you want strict security!
-    allow_credentials=True,
-    allow_methods=["*"], # Allows GET, POST, etc.
-    allow_headers=["*"], # Allows all headers
-)
+import sys
 
 # --- CONFIGURATION IMPORT ---
+# Stripped out frontend variables, only importing what the headless backend needs
 from configuration import (
     DEBUG, 
     BACKEND_CLIENT_ID, 
     BACKEND_CLIENT_SECRET, 
     DIRECTOR_REFRESH_TOKEN, 
-    DIRECTOR_CORPORATION_ID, 
-    FRONTEND_CLIENT_ID, 
-    FRONTEND_CLIENT_SECRET, 
-    CALLBACK_URL
+    DIRECTOR_CORPORATION_ID
 )
-
-scraper_task = None
 
 # --- LOCAL CACHE ---
 # Stores {type_id: (is_ship_boolean, class_weight)} so we don't spam ESI
@@ -52,13 +24,10 @@ TYPE_CACHE = {}
 def init_db():
     conn = sqlite3.connect("contracts.db")
     c = conn.cursor()
-    # Added type_id and class_weight to the database
     c.execute('''CREATE TABLE IF NOT EXISTS contracts 
                  (contract_id INTEGER PRIMARY KEY, title TEXT, price REAL, issuer_id INTEGER, type_id INTEGER, class_weight INTEGER)''')
     conn.commit()
     conn.close()
-
-init_db()
 
 # --- ESI AUTHENTICATION (BACKEND) ---
 def get_director_access_token(refresh_token):
@@ -73,9 +42,7 @@ def get_director_access_token(refresh_token):
         print(f"[ERROR] Failed to get director access token: {e}")
         return None
 
-
 # --- EXTENSIVE GROUP MAPPING ---
-# Expanded list of EVE Online Ship Group IDs to avoid 'Unknown' tags on complex hulls
 SHIP_GROUPS = {
     # Frigates (Weight 1)
     25: 1, 324: 1, 830: 1, 831: 1, 834: 1, 893: 1, 1283: 1, 1527: 1,
@@ -92,7 +59,6 @@ SHIP_GROUPS = {
 }
 
 def resolve_item_type(type_id):
-    """Hits ESI to check if a type_id is a ship, and caches the result accurately."""
     if type_id in TYPE_CACHE:
         return TYPE_CACHE[type_id]
         
@@ -104,31 +70,29 @@ def resolve_item_type(type_id):
         type_data = res_type.json()
         group_id = type_data.get("group_id")
         
-        # Method A: Check our pre-defined exhaustive Group ID index
         if group_id in SHIP_GROUPS:
             weight = SHIP_GROUPS[group_id]
             TYPE_CACHE[type_id] = (True, weight)
             return (True, weight)
             
-        # Method B: Fallback verification via ESI Category endpoint
         res_group = requests.get(f"https://esi.evetech.net/latest/universe/groups/{group_id}/")
         if res_group.status_code == 200:
             category_id = res_group.json().get("category_id")
-            if category_id == 6:  # Category 6 is explicitly 'Ship'
-                TYPE_CACHE[type_id] = (True, 3) # Default weight to Cruiser baseline if a rare group
+            if category_id == 6:
+                TYPE_CACHE[type_id] = (True, 3) 
                 return (True, 3)
                 
-        # Not a ship
         TYPE_CACHE[type_id] = (False, 99)
         return (False, 99)
             
     except Exception:
         return (False, 99)
 
-# --- BACKGROUND SCRAPER (SMART DELTA SYNC) ---
+# --- BACKGROUND SCRAPER ENGINE ---
 async def scrape_contracts():
-    try:
-        while True:
+    # Outer loop ensures if a critical error happens, it recovers and keeps running indefinitely
+    while True:
+        try:
             print("\n" + "="*50)
             print("[SCRAPER] Starting Smart Sync Cycle...")
             print("="*50)
@@ -271,104 +235,23 @@ async def scrape_contracts():
                 print("[SCRAPER] Cycle complete. Sleeping for 15 minutes.\n")
                 await asyncio.sleep(900)
             
-    except asyncio.CancelledError:
-        print("\n[SERVER] Shutdown signal received. Scraper task cancelled safely.")
+        except asyncio.CancelledError:
+            print("\n[SERVER] Shutdown signal received. Exiting scraper safely.")
+            break
+        except Exception as e:
+            print(f"\n[CRITICAL ERROR] The background scraper crashed: {e}")
+            traceback.print_exc()
+            print("[SERVER] Restarting script in 60 seconds...")
+            await asyncio.sleep(60)
 
-@app.on_event("startup")
-async def startup_event():
-    global scraper_task
-    scraper_task = asyncio.create_task(scrape_contracts())
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    global scraper_task
-    if scraper_task:
-        scraper_task.cancel()
-
-# --- API ENDPOINTS (FRONTEND) ---
-@app.get("/api/contracts")
-def get_contracts():
-    conn = sqlite3.connect("contracts.db")
-    c = conn.cursor()
-    # We now group by BOTH title and type_id. This isolates incorrect ships!
-    c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
+# --- SCRIPT ENTRY POINT ---
+if __name__ == "__main__":
+    print("[SYSTEM] Initializing Headless EVE Contract Scraper...")
+    init_db()
     
-    data = []
-    for row in c.fetchall():
-        data.append({
-            "title": row[0],
-            "type_id": row[1],
-            "class_weight": row[2],
-            "stock": row[3],
-            "min_price": row[4],
-            "max_price": row[5],
-            "cheapest_id": row[6]
-        })
-        
-    conn.close()
-    return data
-
-@app.get("/login")
-def login():
-    encoded_callback = urllib.parse.quote(CALLBACK_URL, safe="")
-    url = f"https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri={encoded_callback}&client_id={FRONTEND_CLIENT_ID}&scope=esi-ui.open_window.v1&state=secure_string"
-    return RedirectResponse(url)
-
-@app.get("/callback")
-def callback(code: str, state: str = None):
-    url = "https://login.eveonline.com/v2/oauth/token"
-    data = {"grant_type": "authorization_code", "code": code}
-    auth = (FRONTEND_CLIENT_ID, FRONTEND_CLIENT_SECRET)
-    res = requests.post(url, data=data, auth=auth)
-    
-    if res.status_code != 200:
-        return HTMLResponse(f"<h1>Login Failed</h1><p>Error: {res.text}</p>")
-        
-    user_access_token = res.json().get("access_token")
-    return RedirectResponse(f"https://emabe390.github.io/SlideContracting/?token={user_access_token}")
-    #return RedirectResponse(f"/?token={user_access_token}")
-
-@app.get("/data")
-def get_public_json():
-    # Strategy A: Try reading the cached JSON file first
     try:
-        with open("contracts.json", "r") as f:
-            data = json.load(f)
-            if data:  # If it contains items, serve it!
-                return data
-    except FileNotFoundError:
-        pass
-
-    # Strategy B Fallback: If JSON is empty/missing, read the DB live so it's never blank
-    print("[API] contracts.json empty or missing. Falling back to live DB query.")
-    conn = sqlite3.connect("contracts.db")
-    c = conn.cursor()
-    c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
-    
-    export_data = []
-    for row in c.fetchall():
-        export_data.append({
-            "title": row[0], "type_id": row[1], "class_weight": row[2],
-            "stock": row[3], "min_price": row[4], "max_price": row[5], "cheapest_id": row[6]
-        })
-    conn.close()
-    return export_data
-
-@app.post("/api/open_window/{contract_id}")
-def open_window(contract_id: int, token: str):
-    url = f"https://esi.evetech.net/latest/ui/openwindow/contract/?contract_id={contract_id}"
-    headers = {"Authorization": f"Bearer {token}"}
-    res = requests.post(url, headers=headers)
-    
-    if res.status_code == 204: 
-        return {"status": "opened"}
-    else:
-        return {"status": "error", "esi_response": res.text}
-
-@app.get("/", response_class=HTMLResponse)
-def index():
-    try:
-        with open("index.html", "r") as f:
-            return f.read()
-    except FileNotFoundError:
-        return HTMLResponse("<h1>Backend is running, but index.html was not found in this folder!</h1>")
+        # Fires up the async loop natively without needing FastAPI/Uvicorn
+        asyncio.run(scrape_contracts())
+    except KeyboardInterrupt:
+        print("\n[SYSTEM] Manual shutdown requested. Goodbye! o7")
+        sys.exit(0)

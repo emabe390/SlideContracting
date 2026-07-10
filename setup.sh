@@ -1,2 +1,3 @@
-python -m venv venv
-pip install fastapi uvicorn requests python-jose
+python3 -m venv venv
+source venv/bin/activate
+pip install requests
