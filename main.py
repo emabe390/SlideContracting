@@ -235,12 +235,20 @@ async def scrape_contracts():
                     
                 print("[SCRAPER] Exported updated contracts.json. Pushing to GitHub...")
                 try:
-                    os.system("git add contracts.json")
-                    os.system("git commit -m 'Automated contract sync update'")
-                    os.system("git push origin main")
+                    # Using subprocess with a 15-second timeout so it CANNOT freeze the server
+                    subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
+                    
+                    # We allow this to fail silently if there are no changes to commit
+                    subprocess.run(["git", "commit", "-m", "Automated contract sync update"], check=False)
+                    
+                    subprocess.run(["git", "push", "origin", "main"], check=True, timeout=15)
                     print("[SCRAPER] GitHub Repository sync complete.")
-                except Exception as git_err:
-                    print(f"[WARNING] Automated Git push failed: {git_err}")
+                except subprocess.TimeoutExpired:
+                    print("[WARNING] Git push timed out! GitHub might be slow. Will try again next cycle.")
+                except subprocess.CalledProcessError as e:
+                    print(f"[WARNING] Git command failed. (This is normal if there were no new changes to push).")
+                except Exception as e:
+                    print(f"[ERROR] Unexpected Git error: {e}")
 
             conn.close()
 
