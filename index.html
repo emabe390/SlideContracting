@@ -203,19 +203,17 @@
                 document.getElementById('contract-table').innerHTML = `<tr><td colspan="5" style="text-align:center; color:#ff4444;"><b>Waiting for backend to sync data... (${err.message})</b></td></tr>`;
             });
 
-        // --- 7. TABLE RENDERING & SORTING ---
         function renderTable() {
             const tbody = document.getElementById('contract-table');
             tbody.innerHTML = '';
             
-            contractData.forEach(row => {
+            // Added 'index' to the forEach loop
+            contractData.forEach((row, index) => {
                 const tr = document.createElement('tr');
                 
                 const minPriceStr = row.min_price.toLocaleString() + " ISK";
                 const maxPriceStr = row.max_price.toLocaleString() + " ISK";
-                
                 const imgSrc = row.type_id > 0 ? `https://images.evetech.net/types/${row.type_id}/icon?size=32` : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                
                 const classNames = {1: "Frigate", 2: "Destroyer", 3: "Cruiser", 4: "Battlecruiser", 5: "Battleship", 6: "Capital", 99: "Unknown"};
                 const hullClass = classNames[row.class_weight] || "Unknown";
 
@@ -228,7 +226,7 @@
                     <td>${row.stock}</td>
                     <td>${minPriceStr} <br><small style="color: #aaa;">(up to ${maxPriceStr})</small></td>
                     <td>
-                        <button onclick="openContract(${row.cheapest_id})">Open Cheapest In-Game</button>
+                        <button onclick="openRandomContract(${index})">Open Random In-Game</button>
                     </td>
                 `;
                 tbody.appendChild(tr);
@@ -260,14 +258,21 @@
             renderTable();
         }
 
-        // --- 8. OPEN IN-GAME WINDOW ---
-        function openContract(contractId) {
+// --- 8. OPEN IN-GAME WINDOW ---
+        function openRandomContract(rowIndex) {
             if (!userToken || userToken === "None") {
                 alert("You must log in first!");
                 return;
             }
             
-            fetch(`https://esi.evetech.net/latest/ui/openwindow/contract/?contract_id=${contractId}`, { 
+            // Extract the list of cheapest IDs for this specific row
+            const row = contractData[rowIndex];
+            const ids = row.cheapest_ids;
+            
+            // Roll the dice! Pick a random ID from the list.
+            const randomContractId = ids[Math.floor(Math.random() * ids.length)];
+            
+            fetch(`https://esi.evetech.net/latest/ui/openwindow/contract/?contract_id=${randomContractId}`, { 
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${userToken}`,

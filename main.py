@@ -188,23 +188,38 @@ async def scrape_contracts():
             conn.commit()
 
             # --- 6. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
-            c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
+            c.execute("SELECT title, type_id, class_weight, price, contract_id FROM contracts")
             
-            export_data = []
+            grouped_contracts = {}
             for r in c.fetchall():
+                title, type_id, class_weight, price, contract_id = r
+                key = (title, type_id, class_weight)
+                
+                if key not in grouped_contracts:
+                    grouped_contracts[key] = []
+                grouped_contracts[key].append({"price": price, "id": contract_id})
+                
+            export_data = []
+            for key, contracts in grouped_contracts.items():
+                min_price = min(c["price"] for c in contracts)
+                max_price = max(c["price"] for c in contracts)
+                
+                # Gather ALL contract IDs that share the absolute lowest price
+                cheapest_ids = [c["id"] for c in contracts if c["price"] == min_price]
+                
                 export_data.append({
-                    "title": r[0], 
-                    "type_id": r[1], 
-                    "class_weight": r[2], 
-                    "stock": r[3], 
-                    "min_price": r[4], 
-                    "max_price": r[5], 
-                    "cheapest_id": r[6]
+                    "title": key[0], 
+                    "type_id": key[1], 
+                    "class_weight": key[2], 
+                    "stock": len(contracts), 
+                    "min_price": min_price, 
+                    "max_price": max_price, 
+                    "cheapest_ids": cheapest_ids # Sending the whole array!
                 })
             
             with open("contracts.json", "w") as json_file:
                 json.dump(export_data, json_file)
-                
+
             print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
             
             try:
