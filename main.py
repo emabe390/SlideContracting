@@ -139,7 +139,7 @@ async def scrape_contracts():
                 
             headers = {"Authorization": f"Bearer {token}"}
             
-            # 1. Fetch ALL currently active contracts (One fast call)
+            # 1. Fetch active contracts
             url = f"https://esi.evetech.net/latest/corporations/{DIRECTOR_CORPORATION_ID}/contracts/"
             res = requests.get(url, headers=headers)
             
@@ -149,33 +149,31 @@ async def scrape_contracts():
                 continue
                 
             raw_contracts = res.json()
-            
-            # Build a dictionary of valid active contracts
             active_contracts = {
                 c.get("contract_id"): c 
                 for c in raw_contracts 
                 if c.get("type") == "item_exchange" and c.get("status") == "outstanding" and c.get("title")
             }
 
-            # 2. Check what we ALREADY have in our local database
+            # 2. Check local database
             conn = sqlite3.connect("contracts.db")
             c = conn.cursor()
             c.execute("SELECT contract_id FROM contracts")
             existing_ids = set([row[0] for row in c.fetchall()])
             live_ids = set(active_contracts.keys())
 
-            # 3. Remove contracts that have been completed, sold, or cancelled
+            # 3. Clean up dead contracts
             dead_ids = existing_ids - live_ids
             if dead_ids:
                 print(f"[SCRAPER] Removing {len(dead_ids)} dead contracts from DB.")
                 for d_id in dead_ids:
                     c.execute("DELETE FROM contracts WHERE contract_id = ?", (d_id,))
 
-            # 4. Find completely NEW contracts to process
+            # 4. Find new contracts
             new_ids = list(live_ids - existing_ids)
             print(f"[SCRAPER] Found {len(new_ids)} brand new contracts to evaluate.")
 
-            # 5. Process a safe BATCH of new contracts to avoid timeouts
+            # 5. Process batches
             BATCH_SIZE = 200
             ids_to_process = new_ids[:BATCH_SIZE]
 
@@ -187,7 +185,6 @@ async def scrape_contracts():
                     issuer_id = contract["issuer_id"]
                     title = contract["title"].strip()
                     
-                    # Fetch items (This is the slow part, which is why we batch it)
                     items_url = f"https://esi.evetech.net/latest/corporations/{DIRECTOR_CORPORATION_ID}/contracts/{c_id}/items/"
                     items_res = requests.get(items_url, headers=headers)
                     
@@ -218,16 +215,13 @@ async def scrape_contracts():
                     
                     if index % 5 == 0:
                         print(f"  -> {index}/{len(ids_to_process)} processed in this batch...")
-                        await asyncio.sleep(0.2) # Yield to prevent UI freezing
-                print("[SCRAPER] Synchronization done!")
+                        await asyncio.sleep(0.2)
             else:
                 print("[SCRAPER] Database is fully up to date with EVE ESI.")
 
-            # Save the DB changes from this batch
             conn.commit()
 
             # --- 6. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
-            # Query all data from the database, grouping it by doctrine
             c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
             
             export_data = []
@@ -242,25 +236,18 @@ async def scrape_contracts():
                     "cheapest_id": r[6]
                 })
             
-            # Write everything directly to contracts.json
             with open("contracts.json", "w") as json_file:
                 json.dump(export_data, json_file)
                 
             print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
             
             try:
-                # Stage the JSON file
                 subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
-                
-                # Attempt to commit. We capture the output so it doesn't spam your terminal if there are no changes.
                 commit_result = subprocess.run(
                     ["git", "commit", "-m", "Automated contract sync update"], 
-                    capture_output=True, 
-                    text=True
+                    capture_output=True, text=True
                 )
                 
-                # Git naturally returns a '0' code if a commit is successful. 
-                # If it's anything else, it means the JSON file hasn't changed since the last push.
                 if commit_result.returncode == 0:
                     subprocess.run(["git", "push", "origin", "main"], check=True, timeout=15)
                     print("[SCRAPER] Git Push successful. GitHub Pages is updating!")
@@ -272,7 +259,6 @@ async def scrape_contracts():
             except Exception as e:
                 print(f"[ERROR] Unexpected Git error: {e}")
 
-            # Close the database connection for this cycle
             conn.close()
 
             # --- 7. DYNAMIC SLEEP PACING ---
@@ -280,8 +266,8 @@ async def scrape_contracts():
                 print(f"[SCRAPER] Still {len(new_ids) - BATCH_SIZE} contracts in backlog. Sleeping 10 seconds before next batch...")
                 await asyncio.sleep(10)
             else:
-                print("[SCRAPER] Cycle complete. Sleeping for 5 minutes.\n")
-                await asyncio.sleep(300)
+                print("[SCRAPER] Cycle complete. Sleeping for 15 minutes.\n")
+                await asyncio.sleep(900)
             
     except asyncio.CancelledError:
         print("\n[SERVER] Shutdown signal received. Scraper task cancelled safely.")
