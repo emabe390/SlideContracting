@@ -141,11 +141,17 @@
         }
 
         async function startPkceLogin() {
+            // Generate the PKCE verifier
             const verifier = generateRandomString(64);
             localStorage.setItem('pkce_verifier', verifier);
             const challenge = await generateCodeChallenge(verifier);
             
-            const loginUrl = `https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&client_id=${clientId}&scope=${scope}&code_challenge=${challenge}&code_challenge_method=S256`;
+            // Generate a random state string to satisfy CCP's security check
+            const state = generateRandomString(16); 
+            
+            // Added &state=${state} to the very end of this URL!
+            const loginUrl = `https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&client_id=${clientId}&scope=${scope}&code_challenge=${challenge}&code_challenge_method=S256&state=${state}`;
+            
             window.location.href = loginUrl;
         }
 
