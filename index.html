@@ -106,13 +106,26 @@
         <tbody id="contract-table">
             </tbody>
     </table>
-
-    <script>
-        const clientId = 'ee7a29969a1547d28da9cb148b79c3e7'; // It is 100% safe to have this public!
+<script>
+        // --- 1. CONFIGURATION ---
+        const clientId = 'YOUR_FRONTEND_CLIENT_ID'; // Make sure to paste your EVE App Client ID here!
         const redirectUri = 'https://emabe390.github.io/SlideContracting/';
         const scope = 'esi-ui.open_window.v1';
 
-        // --- PKCE CRYPTOGRAPHY FUNCTIONS ---
+        // --- 2. URL PARSING (Done strictly ONCE) ---
+        const urlParams = new URLSearchParams(window.location.search);
+        const authCode = urlParams.get('code');
+        const userToken = urlParams.get('token'); 
+
+        // --- 3. APP STATE & UI ---
+        let contractData = [];
+        let currentSort = { column: 'class_weight', direction: 'asc' };
+
+        if (userToken && userToken !== "None") {
+            document.getElementById('auth-section').innerHTML = "<span style='color: #00ff00; font-weight: bold;'>Logged In! You can now open contracts.</span>";
+        }
+
+        // --- 4. PKCE CRYPTOGRAPHY FUNCTIONS ---
         function generateRandomString(length) {
             const validChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
             let array = new Uint8Array(length);
@@ -129,18 +142,14 @@
 
         async function startPkceLogin() {
             const verifier = generateRandomString(64);
-            localStorage.setItem('pkce_verifier', verifier); // Save temporarily in browser
+            localStorage.setItem('pkce_verifier', verifier);
             const challenge = await generateCodeChallenge(verifier);
             
             const loginUrl = `https://login.eveonline.com/v2/oauth/authorize?response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&client_id=${clientId}&scope=${scope}&code_challenge=${challenge}&code_challenge_method=S256`;
-            window.location.href = loginUrl; // Redirect to CCP
+            window.location.href = loginUrl;
         }
 
-        // --- LOGIN CALLBACK HANDLER ---
-        const urlParams = new URLSearchParams(window.location.search);
-        const authCode = urlParams.get('code');
-        let userToken = urlParams.get('token'); 
-
+        // --- 5. LOGIN CALLBACK HANDLER ---
         // If CCP just sent us back with an auth code, exchange it for a token!
         if (authCode) {
             const verifier = localStorage.getItem('pkce_verifier');
@@ -166,38 +175,41 @@
             })
             .catch(err => console.error("Token exchange failed:", err));
         }
-        
-        const urlParams = new URLSearchParams(window.location.search);
-        const userToken = urlParams.get('token');
 
-        let contractData = [];
-        let currentSort = { column: 'class_weight', direction: 'asc' };
-
-        if (userToken && userToken !== "None") {
-            document.getElementById('auth-section').innerHTML = "";
-        }
-
-        // Reads the file locally from GitHub Pages securely via HTTPS
+        // --- 6. DATA FETCH ---
+        // Reads the file locally from GitHub Pages securely via HTTPS 
         fetch('contracts.json')
-            .then(response => response.json())
-            .then(data => {
-                contractData = data;
-                sortBy('class_weight');
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                return response.text(); 
             })
-            .catch(err => console.error("Failed to load contracts data from repository asset cache.", err));
+            .then(text => {
+                if (!text || text.trim() === "") {
+                    throw new Error("contracts.json is completely empty!");
+                }
+                contractData = JSON.parse(text);
+                sortBy('class_weight'); 
+            })
+            .catch(err => {
+                console.error("Data Load Error:", err);
+                document.getElementById('contract-table').innerHTML = `<tr><td colspan="5" style="text-align:center; color:#ff4444;"><b>Waiting for backend to sync data... (${err.message})</b></td></tr>`;
+            });
 
+        // --- 7. TABLE RENDERING & SORTING ---
         function renderTable() {
             const tbody = document.getElementById('contract-table');
             tbody.innerHTML = '';
-
+            
             contractData.forEach(row => {
                 const tr = document.createElement('tr');
-
+                
                 const minPriceStr = row.min_price.toLocaleString() + " ISK";
                 const maxPriceStr = row.max_price.toLocaleString() + " ISK";
-
+                
                 const imgSrc = row.type_id > 0 ? `https://images.evetech.net/types/${row.type_id}/icon?size=32` : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-
+                
                 const classNames = {1: "Frigate", 2: "Destroyer", 3: "Cruiser", 4: "Battlecruiser", 5: "Battleship", 6: "Capital", 99: "Unknown"};
                 const hullClass = classNames[row.class_weight] || "Unknown";
 
@@ -228,7 +240,7 @@
             contractData.sort((a, b) => {
                 let valA = a[column];
                 let valB = b[column];
-
+                
                 if (typeof valA === 'string') {
                     valA = valA.toLowerCase();
                     valB = valB.toLowerCase();
@@ -238,18 +250,17 @@
                 if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
                 return 0;
             });
-
+            
             renderTable();
         }
 
+        // --- 8. OPEN IN-GAME WINDOW ---
         function openContract(contractId) {
             if (!userToken || userToken === "None") {
                 alert("You must log in first!");
                 return;
             }
-
-            // FIXED: Pings the EVE Online API directly via HTTPS! 
-            // This completely bypasses the Mixed Content block.
+            
             fetch(`https://esi.evetech.net/latest/ui/openwindow/contract/?contract_id=${contractId}`, { 
                 method: 'POST',
                 headers: {
@@ -258,7 +269,6 @@
                 }
             })
             .then(res => {
-                // ESI returns 204 No Content if the window opens successfully
                 if (res.status !== 204) {
                     return res.json().then(errData => {
                         alert('Failed to open window. ESI Error: ' + (errData.error || res.status));
