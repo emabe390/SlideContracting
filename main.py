@@ -223,34 +223,56 @@ async def scrape_contracts():
             else:
                 print("[SCRAPER] Database is fully up to date with EVE ESI.")
 
-            # Save the DB changes
+            # Save the DB changes from this batch
             conn.commit()
 
-            # --- 6. ONLY EXPORT AND PUSH IF SOMETHING CHANGED ---
-            if dead_ids or ids_to_process:
-                c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
-                export_data = [{"title": r[0], "type_id": r[1], "class_weight": r[2], "stock": r[3], "min_price": r[4], "max_price": r[5], "cheapest_id": r[6]} for r in c.fetchall()]
+            # --- 6. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
+            # Query all data from the database, grouping it by doctrine
+            c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
+            
+            export_data = []
+            for r in c.fetchall():
+                export_data.append({
+                    "title": r[0], 
+                    "type_id": r[1], 
+                    "class_weight": r[2], 
+                    "stock": r[3], 
+                    "min_price": r[4], 
+                    "max_price": r[5], 
+                    "cheapest_id": r[6]
+                })
+            
+            # Write everything directly to contracts.json
+            with open("contracts.json", "w") as json_file:
+                json.dump(export_data, json_file)
                 
-                with open("contracts.json", "w") as json_file:
-                    json.dump(export_data, json_file)
-                    
-                print("[SCRAPER] Exported updated contracts.json. Pushing to GitHub...")
-                try:
-                    # Using subprocess with a 15-second timeout so it CANNOT freeze the server
-                    subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
-                    
-                    # We allow this to fail silently if there are no changes to commit
-                    subprocess.run(["git", "commit", "-m", "Automated contract sync update"], check=False)
-                    
+            print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
+            
+            try:
+                # Stage the JSON file
+                subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
+                
+                # Attempt to commit. We capture the output so it doesn't spam your terminal if there are no changes.
+                commit_result = subprocess.run(
+                    ["git", "commit", "-m", "Automated contract sync update"], 
+                    capture_output=True, 
+                    text=True
+                )
+                
+                # Git naturally returns a '0' code if a commit is successful. 
+                # If it's anything else, it means the JSON file hasn't changed since the last push.
+                if commit_result.returncode == 0:
                     subprocess.run(["git", "push", "origin", "main"], check=True, timeout=15)
-                    print("[SCRAPER] GitHub Repository sync complete.")
-                except subprocess.TimeoutExpired:
-                    print("[WARNING] Git push timed out! GitHub might be slow. Will try again next cycle.")
-                except subprocess.CalledProcessError as e:
-                    print(f"[WARNING] Git command failed. (This is normal if there were no new changes to push).")
-                except Exception as e:
-                    print(f"[ERROR] Unexpected Git error: {e}")
+                    print("[SCRAPER] Git Push successful. GitHub Pages is updating!")
+                else:
+                    print("[SCRAPER] No price or stock changes detected. Skipped Git push to save bandwidth.")
+                    
+            except subprocess.TimeoutExpired:
+                print("[WARNING] Git push timed out! GitHub might be slow. Will try again next cycle.")
+            except Exception as e:
+                print(f"[ERROR] Unexpected Git error: {e}")
 
+            # Close the database connection for this cycle
             conn.close()
 
             # --- 7. DYNAMIC SLEEP PACING ---
