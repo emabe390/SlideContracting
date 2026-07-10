@@ -248,7 +248,9 @@ async def scrape_contracts():
                 await asyncio.sleep(10)
             else:
                 print("[SCRAPER] Cycle complete. Sleeping for 15 minutes.\n")
-                await asyncio.sleep(900)
+                for i in range(15):
+                    await asyncio.sleep(60)
+                    print(f"[SCRAPER] Waiting {15-i} more minutes")
             
         except asyncio.CancelledError:
             print("\n[SERVER] Shutdown signal received. Exiting scraper safely.")
