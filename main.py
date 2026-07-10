@@ -176,7 +176,7 @@ async def scrape_contracts():
             print(f"[SCRAPER] Found {len(new_ids)} brand new contracts to evaluate.")
 
             # 5. Process a safe BATCH of new contracts to avoid timeouts
-            BATCH_SIZE = 25
+            BATCH_SIZE = 200
             ids_to_process = new_ids[:BATCH_SIZE]
 
             if ids_to_process:
@@ -219,6 +219,7 @@ async def scrape_contracts():
                     if index % 5 == 0:
                         print(f"  -> {index}/{len(ids_to_process)} processed in this batch...")
                         await asyncio.sleep(0.2) # Yield to prevent UI freezing
+                print("[SCRAPER] Synchronization done!")
             else:
                 print("[SCRAPER] Database is fully up to date with EVE ESI.")
 
