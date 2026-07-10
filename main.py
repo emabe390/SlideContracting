@@ -257,8 +257,8 @@ async def scrape_contracts():
                 print(f"[SCRAPER] Still {len(new_ids) - BATCH_SIZE} contracts in backlog. Sleeping 10 seconds before next batch...")
                 await asyncio.sleep(10)
             else:
-                print("[SCRAPER] Cycle complete. Sleeping for 15 minutes.\n")
-                await asyncio.sleep(900)
+                print("[SCRAPER] Cycle complete. Sleeping for 5 minutes.\n")
+                await asyncio.sleep(300)
             
     except asyncio.CancelledError:
         print("\n[SERVER] Shutdown signal received. Scraper task cancelled safely.")
