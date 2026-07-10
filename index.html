@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Alliance Contract Market</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            background-color: #1a1a1a; 
+            color: #fff; 
+            padding: 20px; 
+        }
+        table { 
+            width: 100%; 
+            border-collapse: collapse; 
+            margin-top: 20px; 
+        }
+        th, td { 
+            border: 1px solid #444; 
+            padding: 10px; 
+            text-align: left; 
+        }
+        th { 
+            background-color: #333; 
+            cursor: pointer; 
+            user-select: none; 
+        }
+        th:hover { 
+            background-color: #555; 
+        }
+        button { 
+            padding: 8px 12px; 
+            background-color: #007bff; 
+            color: white; 
+            border: none; 
+            cursor: pointer; 
+            border-radius: 4px; 
+        }
+        button:hover { 
+            background-color: #0056b3; 
+        }
+        #auth-section {
+            margin-top: 15px;
+            margin-bottom: 15px;
+        }
+        .sso-button-img {
+            display: inline-block;
+            vertical-align: middle;
+            border-radius: 4px;
+            transition: transform 0.1s ease, filter 0.2s ease;
+            cursor: pointer;
+        }
+        .sso-button-img:hover {
+            filter: brightness(1.2);
+            transform: scale(1.02);
+        }
+        .logo-container {
+            margin-top: 20px;
+            margin-bottom: 20px;
+            text-align: left;
+        }
+        .main-logo {
+            width: 100%;       
+            max-width: 600px;  
+            height: auto;      
+            display: block;
+        }
+        .ship-icon { 
+            vertical-align: middle; 
+            margin-right: 15px; 
+            border-radius: 4px; 
+            width: 32px; 
+            height: 32px; 
+            background-color: #222; 
+        }
+        .title-cell { 
+            display: flex; 
+            align-items: center; 
+            font-weight: bold; 
+        }
+    </style>
+</head>
+<body>
+
+    <div class="logo-container">
+        <img src="logo.png" class="main-logo" alt="Alliance Logo">
+    </div>
+    
+    <div id="auth-section">
+        <a href="http://178.174.173.247:801/login">
+            <img src="https://web.ccpgamescdn.com/eveonlineassets/developers/eve-sso-login-black-small.png" 
+                 class="sso-button-img" 
+                 alt="Log in with EVE Online">
+        </a>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th onclick="sortBy('title')">Doctrine Name ⇕</th>
+                <th onclick="sortBy('class_weight')">Hull Size ⇕</th>
+                <th onclick="sortBy('stock')">Stock Available ⇕</th>
+                <th onclick="sortBy('min_price')">Lowest Price ⇕</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody id="contract-table">
+            </tbody>
+    </table>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const userToken = urlParams.get('token');
+        
+        let contractData = [];
+        let currentSort = { column: 'class_weight', direction: 'asc' };
+
+        if (userToken && userToken !== "None") {
+            document.getElementById('auth-section').innerHTML = "<span style='color: #00ff00; font-weight: bold;'>Logged In! You can now open contracts.</span>";
+        }
+
+        // Pulls structured JSON endpoint straight from the Raspberry Pi
+        fetch('http://178.174.173.247:801/data')
+            .then(response => response.json())
+            .then(data => {
+                contractData = data;
+                sortBy('class_weight'); 
+            });
+
+        function renderTable() {
+            const tbody = document.getElementById('contract-table');
+            tbody.innerHTML = '';
+            
+            contractData.forEach(row => {
+                const tr = document.createElement('tr');
+                
+                const minPriceStr = row.min_price.toLocaleString() + " ISK";
+                const maxPriceStr = row.max_price.toLocaleString() + " ISK";
+                
+                const imgSrc = row.type_id > 0 ? `https://images.evetech.net/types/${row.type_id}/icon?size=32` : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                
+                const classNames = {1: "Frigate", 2: "Destroyer", 3: "Cruiser", 4: "Battlecruiser", 5: "Battleship", 6: "Capital", 99: "Unknown"};
+                const hullClass = classNames[row.class_weight] || "Unknown";
+
+                tr.innerHTML = `
+                    <td class="title-cell">
+                        <img src="${imgSrc}" class="ship-icon" alt="Ship Icon">
+                        ${row.title}
+                    </td>
+                    <td>${hullClass}</td>
+                    <td>${row.stock}</td>
+                    <td>${minPriceStr} <br><small style="color: #aaa;">(up to ${maxPriceStr})</small></td>
+                    <td>
+                        <button onclick="openContract(${row.cheapest_id})">Open Cheapest In-Game</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+
+        function sortBy(column) {
+            if (currentSort.column === column) {
+                currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                currentSort.column = column;
+                currentSort.direction = 'asc';
+            }
+
+            contractData.sort((a, b) => {
+                let valA = a[column];
+                let valB = b[column];
+                
+                if (typeof valA === 'string') {
+                    valA = valA.toLowerCase();
+                    valB = valB.toLowerCase();
+                }
+
+                if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
+                if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
+                return 0;
+            });
+            
+            renderTable();
+        }
+
+        function openContract(contractId) {
+            if (!userToken || userToken === "None") {
+                alert("You must log in first!");
+                return;
+            }
+            // Pings your Pi engine over the network to send the ESI open window signal
+            fetch(`http://178.174.173.247:801/api/open_window/${contractId}?token=${userToken}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status !== "opened") {
+                        alert('Failed to open window. ESI Error: ' + data.esi_response);
+                    }
+                })
+                .catch(err => alert('Network error while trying to reach the contract engine.'));
+        }
+    </script>
+</body>
+</html>
