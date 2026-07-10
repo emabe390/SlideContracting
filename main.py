@@ -123,13 +123,12 @@ def resolve_item_type(type_id):
     except Exception:
         return (False, 99)
 
-
-# --- BACKGROUND SCRAPER ---
+# --- BACKGROUND SCRAPER (SMART DELTA SYNC) ---
 async def scrape_contracts():
     try:
         while True:
             print("\n" + "="*50)
-            print("[SCRAPER] Starting sync cycle (SMART SCRAPE)...")
+            print("[SCRAPER] Starting Smart Sync Cycle...")
             print("="*50)
             
             token = get_director_access_token(DIRECTOR_REFRESH_TOKEN)
@@ -140,7 +139,7 @@ async def scrape_contracts():
                 
             headers = {"Authorization": f"Bearer {token}"}
             
-            # Fetch Contracts
+            # 1. Fetch ALL currently active contracts (One fast call)
             url = f"https://esi.evetech.net/latest/corporations/{DIRECTOR_CORPORATION_ID}/contracts/"
             res = requests.get(url, headers=headers)
             
@@ -150,93 +149,108 @@ async def scrape_contracts():
                 continue
                 
             raw_contracts = res.json()
-            contracts = [c for c in raw_contracts if c.get("type") == "item_exchange" and c.get("status") == "outstanding" and c.get("title")]
             
-            print(f"[SCRAPER] Found {len(contracts)} valid doctrine contracts. Inspecting contents...")
+            # Build a dictionary of valid active contracts
+            active_contracts = {
+                c.get("contract_id"): c 
+                for c in raw_contracts 
+                if c.get("type") == "item_exchange" and c.get("status") == "outstanding" and c.get("title")
+            }
 
+            # 2. Check what we ALREADY have in our local database
             conn = sqlite3.connect("contracts.db")
             c = conn.cursor()
-            c.execute("DELETE FROM contracts")
-            
-# ... Inside scrape_contracts loop ...
-            for index, contract in enumerate(contracts, 1):
-                c_id = contract["contract_id"]
-                price = contract["price"]
-                issuer_id = contract["issuer_id"]
-                title = contract["title"].strip()
-                
-                items_url = f"https://esi.evetech.net/latest/corporations/{DIRECTOR_CORPORATION_ID}/contracts/{c_id}/items/"
-                items_res = requests.get(items_url, headers=headers)
-                
-                ship_type_id = 0
-                class_weight = 99
-                fallback_candidate = 0 # Remembers the most valuable raw asset found
-                
-                if items_res.status_code == 200:
-                    items = items_res.json()
+            c.execute("SELECT contract_id FROM contracts")
+            existing_ids = set([row[0] for row in c.fetchall()])
+            live_ids = set(active_contracts.keys())
+
+            # 3. Remove contracts that have been completed, sold, or cancelled
+            dead_ids = existing_ids - live_ids
+            if dead_ids:
+                print(f"[SCRAPER] Removing {len(dead_ids)} dead contracts from DB.")
+                for d_id in dead_ids:
+                    c.execute("DELETE FROM contracts WHERE contract_id = ?", (d_id,))
+
+            # 4. Find completely NEW contracts to process
+            new_ids = list(live_ids - existing_ids)
+            print(f"[SCRAPER] Found {len(new_ids)} brand new contracts to evaluate.")
+
+            # 5. Process a safe BATCH of new contracts to avoid timeouts
+            BATCH_SIZE = 25
+            ids_to_process = new_ids[:BATCH_SIZE]
+
+            if ids_to_process:
+                print(f"[SCRAPER] Fetching item details for batch of {len(ids_to_process)} contracts...")
+                for index, c_id in enumerate(ids_to_process, 1):
+                    contract = active_contracts[c_id]
+                    price = contract["price"]
+                    issuer_id = contract["issuer_id"]
+                    title = contract["title"].strip()
                     
-                    # CRITICAL FIX: Sort items so higher-value single items are processed first.
-                    # This prevents raw ammo stacks (qty 1000) from blinding the loop tracker.
-                    items = sorted(items, key=lambda x: x.get("quantity", 1))
+                    # Fetch items (This is the slow part, which is why we batch it)
+                    items_url = f"https://esi.evetech.net/latest/corporations/{DIRECTOR_CORPORATION_ID}/contracts/{c_id}/items/"
+                    items_res = requests.get(items_url, headers=headers)
                     
-                    for item in items:
-                        tid = item["type_id"]
+                    ship_type_id = 0
+                    class_weight = 99
+                    fallback_candidate = 0
+                    
+                    if items_res.status_code == 200:
+                        items = items_res.json()
+                        items = sorted(items, key=lambda x: x.get("quantity", 1))
                         
-                        # Keep track of a valid item type to ensure image renders even if categorizer fails
-                        if fallback_candidate == 0:
-                            fallback_candidate = tid
-                            
-                        is_ship, weight = resolve_item_type(tid)
-                        if is_ship:
-                            ship_type_id = tid
-                            class_weight = weight
-                            break # Found the validated hull, stop searching this contract
-                
-                # If no explicit ship category was caught but we have items, apply fallback for icon integrity
-                if ship_type_id == 0 and fallback_candidate > 0:
-                    ship_type_id = fallback_candidate
+                        for item in items:
+                            tid = item["type_id"]
+                            if fallback_candidate == 0:
+                                fallback_candidate = tid
+                                
+                            is_ship, weight = resolve_item_type(tid)
+                            if is_ship:
+                                ship_type_id = tid
+                                class_weight = weight
+                                break
+
+                    if ship_type_id == 0 and fallback_candidate > 0:
+                        ship_type_id = fallback_candidate
+                        
+                    c.execute("INSERT INTO contracts VALUES (?, ?, ?, ?, ?, ?)", 
+                              (c_id, title, price, issuer_id, ship_type_id, class_weight))
                     
-                c.execute("INSERT INTO contracts VALUES (?, ?, ?, ?, ?, ?)", (c_id, title, price, issuer_id, ship_type_id, class_weight))
+                    if index % 5 == 0:
+                        print(f"  -> {index}/{len(ids_to_process)} processed in this batch...")
+                        await asyncio.sleep(0.2) # Yield to prevent UI freezing
+            else:
+                print("[SCRAPER] Database is fully up to date with EVE ESI.")
 
-                if index % 20 == 0:
-                    print(f"  -> Processed {index}/{len(contracts)} contracts...")
-                    await asyncio.sleep(0.1) # Yield to the webserver so we don't freeze the UI
-            
+            # Save the DB changes
             conn.commit()
-            conn.close()
-            
-            # Export the exact same data to a public JSON file
-            c_export = conn.cursor()
-            c_export.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
-            
-            export_data = []
-            for row in c_export.fetchall():
-                export_data.append({
-                    "title": row[0], "type_id": row[1], "class_weight": row[2],
-                    "stock": row[3], "min_price": row[4], "max_price": row[5], "cheapest_id": row[6]
-                })
-            
-            # Save it right into your root folder
-            with open("contracts.json", "w") as json_file:
-                json.dump(export_data, json_file)
+
+            # --- 6. ONLY EXPORT AND PUSH IF SOMETHING CHANGED ---
+            if dead_ids or ids_to_process:
+                c.execute("SELECT title, type_id, class_weight, COUNT(*), MIN(price), MAX(price), MIN(contract_id) FROM contracts GROUP BY title, type_id, class_weight")
+                export_data = [{"title": r[0], "type_id": r[1], "class_weight": r[2], "stock": r[3], "min_price": r[4], "max_price": r[5], "cheapest_id": r[6]} for r in c.fetchall()]
                 
-            print("[SCRAPER] Public contracts.json file generated successfully.")            
+                with open("contracts.json", "w") as json_file:
+                    json.dump(export_data, json_file)
+                    
+                print("[SCRAPER] Exported updated contracts.json. Pushing to GitHub...")
+                try:
+                    os.system("git add contracts.json")
+                    os.system("git commit -m 'Automated contract sync update'")
+                    os.system("git push origin main")
+                    print("[SCRAPER] GitHub Repository sync complete.")
+                except Exception as git_err:
+                    print(f"[WARNING] Automated Git push failed: {git_err}")
 
-            # --- AUTOMATIC GIT UPDATE ROUTINE ---
-            try:
-                print("[SCRAPER] Pushing fresh data to GitHub...")
-                # Sequentially staging, committing, and uploading the data file
-                os.system("git add contracts.json")
-                os.system("git commit -m 'Automated asset cache sync update'")
-                os.system("git push origin main") 
-                print("[SCRAPER] GitHub Repository sync complete.")
-            except Exception as git_err:
-                print(f"[WARNING] Automated Git push skipped or failed: {git_err}")
+            conn.close()
 
-
-            print("[SCRAPER] Sync complete successfully.")
-            print("[SCRAPER] Sleeping for 15 minutes.\n")
-            await asyncio.sleep(900)
+            # --- 7. DYNAMIC SLEEP PACING ---
+            if len(new_ids) > BATCH_SIZE:
+                print(f"[SCRAPER] Still {len(new_ids) - BATCH_SIZE} contracts in backlog. Sleeping 10 seconds before next batch...")
+                await asyncio.sleep(10)
+            else:
+                print("[SCRAPER] Cycle complete. Sleeping for 15 minutes.\n")
+                await asyncio.sleep(900)
             
     except asyncio.CancelledError:
         print("\n[SERVER] Shutdown signal received. Scraper task cancelled safely.")
