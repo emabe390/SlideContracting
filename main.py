@@ -397,16 +397,20 @@ async def scrape_contracts():
 
                 export_data = []
 
-                for type_id, contracts in by_type.items():
+                # Sort type_ids for deterministic iteration
+                for type_id in sorted(by_type.keys()):
+                    contracts = by_type[type_id]
                     if type_id == 0:
                         # Unknown hull — no type_id to cluster by; fall back to title
                         by_title = defaultdict(list)
                         for c in contracts:
                             by_title[c["title"]].append(c)
-                        for title, group in by_title.items():
+                        # Sort titles for deterministic output
+                        for title in sorted(by_title.keys()):
+                            group = by_title[title]
                             min_price = min(c["price"] for c in group)
                             max_price = max(c["price"] for c in group)
-                            cheapest_ids = [c["id"] for c in group if c["price"] == min_price]
+                            cheapest_ids = sorted(c["id"] for c in group if c["price"] == min_price)
                             first_race = next((c["race_id"] for c in group if c.get("race_id")), None)
                             export_data.append({
                                 "title": title,
@@ -420,9 +424,9 @@ async def scrape_contracts():
                             })
                     else:
                         # Known hull — cluster by title substring similarity.
-                        # Two titles merge if one is a substring of the other (case-insensitive).
+                        # Sort contracts by title before clustering for deterministic order.
                         clusters = []
-                        for c in contracts:
+                        for c in sorted(contracts, key=lambda x: x["title"]):
                             norm = c["title"].strip().lower()
                             placed = False
                             for cluster in clusters:
@@ -435,11 +439,11 @@ async def scrape_contracts():
                                 clusters.append([{**c, "_norm": norm}])
 
                         for cluster in clusters:
-                            # Canonical title = most common; longest as tiebreaker
+                            # Canonical title = most common; longest as tiebreaker; alphabetical as final tiebreaker
                             title_counts = Counter(c["title"] for c in cluster)
                             canonical = sorted(
                                 title_counts.items(),
-                                key=lambda kv: (-kv[1], -len(kv[0]))
+                                key=lambda kv: (-kv[1], -len(kv[0]), kv[0])
                             )[0][0]
 
                             # Vote on class_weight (prefer non-99)
@@ -450,7 +454,7 @@ async def scrape_contracts():
 
                             min_price = min(c["price"] for c in cluster)
                             max_price = max(c["price"] for c in cluster)
-                            cheapest_ids = [c["id"] for c in cluster if c["price"] == min_price]
+                            cheapest_ids = sorted(c["id"] for c in cluster if c["price"] == min_price)
                             first_race = next((c["race_id"] for c in cluster if c.get("race_id")), None)
 
                             export_data.append({
@@ -464,17 +468,34 @@ async def scrape_contracts():
                                 "cheapest_ids": cheapest_ids
                             })
 
-                output = {
-                    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-                    "contracts": export_data
-                }
+                # Deterministic final sort: class_weight asc, then title asc, then type_id asc
+                export_data.sort(key=lambda x: (x["class_weight"], x["title"].lower(), x["type_id"]))
 
-                with open("contracts.json", "w") as json_file:
-                    json.dump(output, json_file)
+                # --- STABILITY CHECK: skip git noise if contracts haven't changed ---
+                contracts_changed = True
+                if os.path.exists("contracts.json"):
+                    try:
+                        with open("contracts.json", "r") as f:
+                            old_payload = json.load(f)
+                        old_contracts = old_payload.get("contracts", [])
+                        # Deep compare ignoring updated_at
+                        if json.dumps(old_contracts, sort_keys=True) == json.dumps(export_data, sort_keys=True):
+                            contracts_changed = False
+                    except Exception:
+                        pass  # Treat any read/parse failure as "changed"
 
-                print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
+                if contracts_changed:
+                    output = {
+                        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                        "contracts": export_data
+                    }
+                    with open("contracts.json", "w") as json_file:
+                        json.dump(output, json_file)
+                    print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
+                else:
+                    print("[SCRAPER] Contract data unchanged. Skipping git commit.")
 
-                # --- GIT SYNC: pull latest, then push ---
+                # --- GIT SYNC: pull latest (always), push only if data changed ---
                 try:
                     # Record current HEAD before pulling
                     pre_pull = subprocess.run(
@@ -505,17 +526,18 @@ async def scrape_contracts():
                             else:
                                 print("[SCRAPER] Git pull brought non-Python updates. Continuing...")
 
-                    subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
-                    commit_result = subprocess.run(
-                        ["git", "commit", "-m", "Automated contract sync update"],
-                        capture_output=True, text=True
-                    )
+                    if contracts_changed:
+                        subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
+                        commit_result = subprocess.run(
+                            ["git", "commit", "-m", "Automated contract sync update"],
+                            capture_output=True, text=True
+                        )
 
-                    if commit_result.returncode == 0:
-                        subprocess.run(["git", "push", "origin", "main"], check=True, timeout=15)
-                        print("[SCRAPER] Git Push successful. GitHub Pages is updating!")
-                    else:
-                        print("[SCRAPER] No price or stock changes detected. Skipped Git push to save bandwidth.")
+                        if commit_result.returncode == 0:
+                            subprocess.run(["git", "push", "origin", "main"], check=True, timeout=15)
+                            print("[SCRAPER] Git Push successful. GitHub Pages is updating!")
+                        else:
+                            print("[SCRAPER] No price or stock changes detected. Skipped Git push to save bandwidth.")
 
                 except subprocess.TimeoutExpired:
                     print("[WARNING] Git push timed out! GitHub might be slow. Will try again next cycle.")
