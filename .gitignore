@@ -2,3 +2,4 @@ configuration.py
 __pycache__
 venv
 contracts.db
+DEPLOYMENT.md

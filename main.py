@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import sqlite3
 import traceback
 import json
@@ -386,8 +387,13 @@ async def scrape_contracts():
                         "cheapest_ids": cheapest_ids
                     })
 
+                output = {
+                    "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "contracts": export_data
+                }
+
                 with open("contracts.json", "w") as json_file:
-                    json.dump(export_data, json_file)
+                    json.dump(output, json_file)
 
                 print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
 
