@@ -191,16 +191,48 @@
             position: relative;
             display: inline-block;
         }
-        .faction-logo {
+        .tech-badge {
             position: absolute;
             top: 4px;
             left: 4px;
-            width: 28px;
-            height: 28px;
-            border-radius: 4px;
-            background-color: rgba(0, 0, 0, 0.55);
             z-index: 2;
             pointer-events: none;
+        }
+        .badge-t2 {
+            background: linear-gradient(135deg, #b8860b, #ffd700);
+            color: #1a1a1a;
+            font-size: 0.75rem;
+            font-weight: 900;
+            padding: 2px 5px;
+            border-radius: 3px;
+            border: 1px solid #b8860b;
+            line-height: 1;
+        }
+        .badge-faction {
+            width: 0;
+            height: 0;
+            border-left: 10px solid transparent;
+            border-right: 10px solid transparent;
+            border-bottom: 18px solid #00cc00;
+            filter: drop-shadow(0 0 2px rgba(0, 200, 0, 0.7));
+        }
+        .badge-pirate {
+            background: #cc0000;
+            color: #fff;
+            font-size: 0.65rem;
+            font-weight: bold;
+            padding: 2px 4px;
+            border-radius: 3px;
+            border: 1px solid #ff4444;
+        }
+        .badge-t3 {
+            background: linear-gradient(135deg, #800080, #da70d6);
+            color: #fff;
+            font-size: 0.75rem;
+            font-weight: 900;
+            padding: 2px 5px;
+            border-radius: 3px;
+            border: 1px solid #800080;
         }
         .card-name {
             font-weight: bold;
@@ -528,13 +560,18 @@
                 const imgWrapper = document.createElement('div');
                 imgWrapper.className = 'card-image-wrapper';
 
-                if (row.faction_corp_id && row.faction_corp_id > 0) {
-                    const logo = document.createElement('img');
-                    logo.src = `https://images.evetech.net/corporations/${row.faction_corp_id}/logo?size=32`;
-                    logo.className = 'faction-logo';
-                    logo.alt = '';
-                    logo.onerror = function() { this.style.display = 'none'; };
-                    imgWrapper.appendChild(logo);
+                if (row.tech_level && row.tech_level !== 't1') {
+                    const badge = document.createElement('div');
+                    badge.className = 'tech-badge badge-' + row.tech_level;
+                    if (row.tech_level === 't2') {
+                        badge.textContent = 'II';
+                    } else if (row.tech_level === 't3') {
+                        badge.textContent = 'III';
+                    } else if (row.tech_level === 'pirate') {
+                        badge.textContent = 'P';
+                    }
+                    // faction uses CSS triangle (no text content)
+                    imgWrapper.appendChild(badge);
                 }
 
                 const img = document.createElement('img');

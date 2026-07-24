@@ -24,12 +24,35 @@ from configuration import (
 TYPE_CACHE = {}
 GROUP_CACHE = {}  # {group_id: (category_id, name)}
 
-# Meta cache: stores {type_id: {"market_group_id": int, "faction_corp_id": int or None}}
+# Meta cache: stores {type_id: {"market_group_id": int, "tech_level": str or None}}
 TYPE_META_CACHE = {}
 # Market group cache: {group_id: {"name": str, "parent_group_id": int or None}}
 MARKET_GROUP_CACHE = {}
-# Faction name → corporation_id: built once from /universe/factions/
-FACTION_CORP_CACHE = {}
+
+# Tech level mapping by group_id — these are definitively T2/T3 hulls
+TECH_GROUPS = {
+    # T2
+    324: "t2",   # Assault Frigate
+    358: "t2",   # Heavy Assault Cruiser
+    541: "t2",   # Interdictor
+    830: "t2",   # Covert Ops
+    831: "t2",   # Interceptor
+    832: "t2",   # Logistics
+    833: "t2",   # Force Recon Ship
+    834: "t2",   # Stealth Bomber
+    893: "t2",   # Electronic Attack Ship
+    894: "t2",   # Heavy Interdiction Cruiser
+    898: "t2",   # Black Ops
+    900: "t2",   # Marauder
+    906: "t2",   # Combat Recon Ship
+    1283: "t2",  # Expedition Frigate
+    1527: "t2",  # Logistics Frigate
+    1534: "t2",  # Command Destroyer
+    1972: "t2",  # Flag Cruiser
+    # T3
+    963: "t3",   # Strategic Cruiser
+    1305: "t3",  # Tactical Destroyer
+}
 
 # --- DATABASE SETUP ---
 def init_db():
@@ -241,83 +264,55 @@ async def fetch_contract_items(client: httpx.AsyncClient, corp_id, contract_id, 
     return all_items
 
 
-async def build_faction_cache(client: httpx.AsyncClient):
-    """Build a mapping of faction names → corporation_id from ESI."""
-    if FACTION_CORP_CACHE:
-        return
-    try:
-        res = await esi_get_with_retry(client, "https://esi.evetech.net/latest/universe/factions/")
-        if res.status_code == 200:
-            for f in res.json():
-                name = f.get("name", "").strip().lower()
-                corp_id = f.get("corporation_id")
-                if name and corp_id:
-                    FACTION_CORP_CACHE[name] = corp_id
-            # Add short-name aliases (e.g. "gallente" → Gallente Federation corp)
-            aliases = {}
-            for full_name, corp_id in list(FACTION_CORP_CACHE.items()):
-                short = full_name.split()[0]
-                if short and short not in FACTION_CORP_CACHE:
-                    aliases[short] = corp_id
-            FACTION_CORP_CACHE.update(aliases)
-    except Exception as e:
-        print(f"[WARNING] Failed to build faction cache: {e}")
-
-
-async def resolve_type_faction(type_id, client: httpx.AsyncClient):
-    """Walk the market group tree to find a ship's faction corporation_id."""
+async def resolve_type_tech_level(type_id, client: httpx.AsyncClient):
+    """Determine tech level (t1, t2, t3, faction, pirate) for a ship type."""
     meta = TYPE_META_CACHE.get(type_id, {})
-    if meta.get("faction_corp_id") is not None:
-        return meta["faction_corp_id"]
+    if meta.get("tech_level") is not None:
+        return meta["tech_level"]
 
-    market_group_id = meta.get("market_group_id")
-    if market_group_id is None:
-        res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/universe/types/{type_id}/")
-        if res.status_code == 200:
-            market_group_id = res.json().get("market_group_id")
-            TYPE_META_CACHE[type_id] = {"market_group_id": market_group_id, "faction_corp_id": None}
-        else:
-            TYPE_META_CACHE[type_id] = {"market_group_id": None, "faction_corp_id": None}
-            return None
+    # Fast path: known T2/T3 groups
+    if type_id in TYPE_CACHE:
+        _, _, _ = TYPE_CACHE[type_id]  # trigger resolve if needed
+    # TYPE_CACHE may not have group_id directly; get it from a type lookup
+    res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/universe/types/{type_id}/")
+    if res.status_code == 200:
+        data = res.json()
+        group_id = data.get("group_id")
+        market_group_id = data.get("market_group_id")
+        TYPE_META_CACHE[type_id] = {"market_group_id": market_group_id, "tech_level": None}
 
-    if not market_group_id:
-        TYPE_META_CACHE[type_id]["faction_corp_id"] = None
-        return None
+        # Check group_id for T2/T3
+        if group_id in TECH_GROUPS:
+            tech = TECH_GROUPS[group_id]
+            TYPE_META_CACHE[type_id]["tech_level"] = tech
+            return tech
 
-    if not FACTION_CORP_CACHE:
-        await build_faction_cache(client)
-
-    mgid = market_group_id
-    while mgid:
-        if mgid in MARKET_GROUP_CACHE:
-            mg_data = MARKET_GROUP_CACHE[mgid]
-        else:
-            res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/markets/groups/{mgid}/")
-            if res.status_code == 200:
-                data = res.json()
-                mg_data = {"name": data.get("name", ""), "parent_group_id": data.get("parent_group_id")}
-                MARKET_GROUP_CACHE[mgid] = mg_data
+        # Walk market group tree for faction/pirate
+        mgid = market_group_id
+        while mgid:
+            if mgid in MARKET_GROUP_CACHE:
+                mg_data = MARKET_GROUP_CACHE[mgid]
             else:
-                break
+                mg_res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/markets/groups/{mgid}/")
+                if mg_res.status_code == 200:
+                    mg_json = mg_res.json()
+                    mg_data = {"name": mg_json.get("name", ""), "parent_group_id": mg_json.get("parent_group_id")}
+                    MARKET_GROUP_CACHE[mgid] = mg_data
+                else:
+                    break
 
-        mg_name = mg_data.get("name", "").strip().lower()
+            mg_name = mg_data.get("name", "").strip().lower()
+            if "navy faction" in mg_name:
+                TYPE_META_CACHE[type_id]["tech_level"] = "faction"
+                return "faction"
+            if "pirate faction" in mg_name:
+                TYPE_META_CACHE[type_id]["tech_level"] = "pirate"
+                return "pirate"
 
-        # Direct match
-        if mg_name in FACTION_CORP_CACHE:
-            corp_id = FACTION_CORP_CACHE[mg_name]
-            TYPE_META_CACHE[type_id]["faction_corp_id"] = corp_id
-            return corp_id
+            mgid = mg_data.get("parent_group_id")
 
-        # Substring match (e.g. "gallente" inside "gallente federation")
-        for faction_name, corp_id in FACTION_CORP_CACHE.items():
-            if mg_name in faction_name or faction_name in mg_name:
-                TYPE_META_CACHE[type_id]["faction_corp_id"] = corp_id
-                return corp_id
-
-        mgid = mg_data.get("parent_group_id")
-
-    TYPE_META_CACHE[type_id]["faction_corp_id"] = None
-    return None
+    TYPE_META_CACHE[type_id]["tech_level"] = "t1"
+    return "t1"
 
 
 async def classify_contract(client, corp_id, contract_id, headers, active_contracts):
@@ -484,12 +479,12 @@ async def scrape_contracts():
 
                 export_data = []
 
-                # Pre-resolve faction for every unique known type_id
+                # Pre-resolve tech level for every unique known type_id
                 known_type_ids = [tid for tid in by_type.keys() if tid > 0]
-                type_factions = {}
+                type_tech = {}
                 for tid in known_type_ids:
-                    corp_id = await resolve_type_faction(tid, client)
-                    type_factions[tid] = corp_id
+                    tech = await resolve_type_tech_level(tid, client)
+                    type_tech[tid] = tech
 
                 # Sort type_ids for deterministic iteration
                 for type_id in sorted(by_type.keys()):
@@ -509,7 +504,7 @@ async def scrape_contracts():
                                 "title": title,
                                 "type_id": 0,
                                 "class_weight": 99,
-                                "faction_corp_id": None,
+                                "tech_level": "t1",
                                 "stock": len(group),
                                 "min_price": min_price,
                                 "max_price": max_price,
@@ -548,13 +543,13 @@ async def scrape_contracts():
                             min_price = min(c["price"] for c in cluster)
                             max_price = max(c["price"] for c in cluster)
                             cheapest_ids = sorted(c["id"] for c in cluster if c["price"] == min_price)
-                            faction_corp_id = type_factions.get(type_id)
+                            tech_level = type_tech.get(type_id, "t1")
 
                             export_data.append({
                                 "title": canonical,
                                 "type_id": type_id,
                                 "class_weight": best_weight,
-                                "faction_corp_id": faction_corp_id,
+                                "tech_level": tech_level,
                                 "stock": len(cluster),
                                 "min_price": min_price,
                                 "max_price": max_price,
