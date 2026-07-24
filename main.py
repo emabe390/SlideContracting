@@ -198,7 +198,11 @@ async def resolve_item_type(type_id, client: httpx.AsyncClient):
         group_id = type_data.get("group_id")
         race_id = type_data.get("race_id")
         market_group_id = type_data.get("market_group_id")
-        TYPE_META_CACHE[type_id] = {"market_group_id": market_group_id, "faction_corp_id": None}
+        TYPE_META_CACHE[type_id] = {
+            "market_group_id": market_group_id,
+            "group_id": group_id,
+            "faction_corp_id": None,
+        }
 
         if group_id in SHIP_GROUPS:
             weight = SHIP_GROUPS[group_id]
@@ -270,48 +274,68 @@ async def resolve_type_tech_level(type_id, client: httpx.AsyncClient):
     if meta.get("tech_level") is not None:
         return meta["tech_level"]
 
-    # Fast path: known T2/T3 groups
-    if type_id in TYPE_CACHE:
-        _, _, _ = TYPE_CACHE[type_id]  # trigger resolve if needed
-    # TYPE_CACHE may not have group_id directly; get it from a type lookup
-    res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/universe/types/{type_id}/")
-    if res.status_code == 200:
-        data = res.json()
-        group_id = data.get("group_id")
-        market_group_id = data.get("market_group_id")
-        TYPE_META_CACHE[type_id] = {"market_group_id": market_group_id, "tech_level": None}
+    group_id = meta.get("group_id")
+    market_group_id = meta.get("market_group_id")
 
-        # Check group_id for T2/T3
-        if group_id in TECH_GROUPS:
-            tech = TECH_GROUPS[group_id]
-            TYPE_META_CACHE[type_id]["tech_level"] = tech
-            return tech
+    # If meta cache is missing key fields, fetch the type endpoint once
+    if group_id is None or market_group_id is None:
+        res = await esi_get_with_retry(
+            client, f"https://esi.evetech.net/latest/universe/types/{type_id}/"
+        )
+        if res.status_code == 200:
+            data = res.json()
+            group_id = data.get("group_id")
+            market_group_id = data.get("market_group_id")
+            meta = {
+                "market_group_id": market_group_id,
+                "group_id": group_id,
+                "tech_level": None,
+            }
+            TYPE_META_CACHE[type_id] = meta
+        else:
+            TYPE_META_CACHE[type_id] = {"tech_level": "t1"}
+            return "t1"
 
-        # Walk market group tree for faction/pirate
-        mgid = market_group_id
-        while mgid:
-            if mgid in MARKET_GROUP_CACHE:
-                mg_data = MARKET_GROUP_CACHE[mgid]
+    # Check group_id for T2/T3
+    if group_id in TECH_GROUPS:
+        tech = TECH_GROUPS[group_id]
+        meta["tech_level"] = tech
+        TYPE_META_CACHE[type_id] = meta
+        return tech
+
+    # Walk market group tree for faction/pirate
+    mgid = market_group_id
+    while mgid:
+        if mgid in MARKET_GROUP_CACHE:
+            mg_data = MARKET_GROUP_CACHE[mgid]
+        else:
+            mg_res = await esi_get_with_retry(
+                client, f"https://esi.evetech.net/latest/markets/groups/{mgid}/"
+            )
+            if mg_res.status_code == 200:
+                mg_json = mg_res.json()
+                mg_data = {
+                    "name": mg_json.get("name", ""),
+                    "parent_group_id": mg_json.get("parent_group_id"),
+                }
+                MARKET_GROUP_CACHE[mgid] = mg_data
             else:
-                mg_res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/markets/groups/{mgid}/")
-                if mg_res.status_code == 200:
-                    mg_json = mg_res.json()
-                    mg_data = {"name": mg_json.get("name", ""), "parent_group_id": mg_json.get("parent_group_id")}
-                    MARKET_GROUP_CACHE[mgid] = mg_data
-                else:
-                    break
+                break
 
-            mg_name = mg_data.get("name", "").strip().lower()
-            if "navy faction" in mg_name:
-                TYPE_META_CACHE[type_id]["tech_level"] = "faction"
-                return "faction"
-            if "pirate faction" in mg_name:
-                TYPE_META_CACHE[type_id]["tech_level"] = "pirate"
-                return "pirate"
+        mg_name = mg_data.get("name", "").strip().lower()
+        if "navy faction" in mg_name:
+            meta["tech_level"] = "faction"
+            TYPE_META_CACHE[type_id] = meta
+            return "faction"
+        if "pirate faction" in mg_name:
+            meta["tech_level"] = "pirate"
+            TYPE_META_CACHE[type_id] = meta
+            return "pirate"
 
-            mgid = mg_data.get("parent_group_id")
+        mgid = mg_data.get("parent_group_id")
 
-    TYPE_META_CACHE[type_id]["tech_level"] = "t1"
+    meta["tech_level"] = "t1"
+    TYPE_META_CACHE[type_id] = meta
     return "t1"
 
 

@@ -325,13 +325,21 @@
         // --- URL PARSING ---
         const urlParams = new URLSearchParams(window.location.search);
         const authCode = urlParams.get('code');
-        const userToken = urlParams.get('token');
+
+        // Read token from localStorage; migrate legacy URL tokens and clean the URL
+        let userToken = localStorage.getItem('eve_token');
+        const urlToken = urlParams.get('token');
+        if (urlToken && urlToken !== 'None') {
+            userToken = urlToken;
+            localStorage.setItem('eve_token', urlToken);
+            history.replaceState(null, '', redirectUri);
+        }
 
         // --- STATE ---
         let contractData = [];
         let visibleData = [];
         let currentSort = { column: 'title', direction: 'asc' };
-        let activeFilter = 'all';
+        let activeFilters = new Set();
         let searchQuery = '';
 
         const CLASS_LABELS = {
@@ -384,7 +392,8 @@
             .then(res => res.json())
             .then(data => {
                 if (data.access_token) {
-                    window.location.replace(`${redirectUri}?token=${data.access_token}`);
+                    localStorage.setItem('eve_token', data.access_token);
+                    window.location.replace(redirectUri);
                 } else {
                     alert('Authentication failed.');
                 }
@@ -468,9 +477,23 @@
         }
 
         function setFilter(weight) {
-            activeFilter = weight;
+            if (weight === 'all') {
+                activeFilters.clear();
+            } else {
+                const w = Number(weight);
+                if (activeFilters.has(w)) {
+                    activeFilters.delete(w);
+                } else {
+                    activeFilters.add(w);
+                }
+            }
             document.querySelectorAll('.chip').forEach(chip => {
-                chip.classList.toggle('active', chip.dataset.weight === String(weight));
+                const w = chip.dataset.weight;
+                if (w === 'all') {
+                    chip.classList.toggle('active', activeFilters.size === 0);
+                } else {
+                    chip.classList.toggle('active', activeFilters.has(Number(w)));
+                }
             });
             applyFiltersAndRender();
         }
@@ -498,8 +521,8 @@
                 visible = visible.filter(c => c.title.toLowerCase().includes(searchQuery));
             }
 
-            if (activeFilter !== 'all') {
-                visible = visible.filter(c => c.class_weight === activeFilter);
+            if (activeFilters.size > 0) {
+                visible = visible.filter(c => activeFilters.has(c.class_weight));
             }
 
             visible.sort((a, b) => {
