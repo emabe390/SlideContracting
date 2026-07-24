@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import os
 import sqlite3
 import traceback
 import json
@@ -473,7 +474,37 @@ async def scrape_contracts():
 
                 print(f"[SCRAPER] Saved {len(export_data)} doctrine types to contracts.json. Syncing with GitHub...")
 
+                # --- GIT SYNC: pull latest, then push ---
                 try:
+                    # Record current HEAD before pulling
+                    pre_pull = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        capture_output=True, text=True, timeout=10
+                    ).stdout.strip()
+
+                    pull_res = subprocess.run(
+                        ["git", "pull", "origin", "main"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if pull_res.returncode != 0:
+                        print(f"[WARNING] Git pull failed: {pull_res.stderr.strip()}")
+                    else:
+                        post_pull = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            capture_output=True, text=True, timeout=10
+                        ).stdout.strip()
+
+                        if pre_pull != post_pull:
+                            diff_names = subprocess.run(
+                                ["git", "diff", "--name-only", pre_pull, post_pull],
+                                capture_output=True, text=True, timeout=10
+                            )
+                            if "main.py" in diff_names.stdout:
+                                print("[SCRAPER] main.py was updated by git pull. Restarting script...")
+                                os.execv(sys.executable, [sys.executable] + sys.argv)
+                            else:
+                                print("[SCRAPER] Git pull brought non-Python updates. Continuing...")
+
                     subprocess.run(["git", "add", "contracts.json"], check=True, timeout=15)
                     commit_result = subprocess.run(
                         ["git", "commit", "-m", "Automated contract sync update"],
