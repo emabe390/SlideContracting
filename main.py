@@ -350,6 +350,17 @@ async def scrape_contracts():
                                 row
                             )
 
+                        # Heal-by-title: if we just got a good classification, fix any
+                        # sibling contracts with the same title that are still unknown.
+                        if row[4] > 0 and row[5] != 99:
+                            c.execute(
+                                "UPDATE contracts SET type_id=?, class_weight=? WHERE title=? AND (type_id=0 OR class_weight=99)",
+                                (row[4], row[5], row[1])
+                            )
+                            healed = c.rowcount
+                            if healed > 0:
+                                print(f"  -> Healed {healed} sibling '{row[1]}' contract(s) with correct classification.")
+
                         if index % 5 == 0:
                             print(f"  -> {index}/{len(total_to_scan)} processed in this batch...")
                             await asyncio.sleep(0.2)
@@ -361,26 +372,43 @@ async def scrape_contracts():
                 # --- 7. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
                 c.execute("SELECT title, type_id, class_weight, price, contract_id FROM contracts")
 
+                from collections import Counter
+
                 grouped_contracts = {}
                 for r in c.fetchall():
                     title, type_id, class_weight, price, contract_id = r
-                    key = (title, type_id, class_weight)
-
-                    if key not in grouped_contracts:
-                        grouped_contracts[key] = []
-                    grouped_contracts[key].append({"price": price, "id": contract_id})
+                    if title not in grouped_contracts:
+                        grouped_contracts[title] = []
+                    grouped_contracts[title].append({
+                        "type_id": type_id,
+                        "class_weight": class_weight,
+                        "price": price,
+                        "id": contract_id
+                    })
 
                 export_data = []
-                for key, contracts in grouped_contracts.items():
+                for title, contracts in grouped_contracts.items():
                     min_price = min(c["price"] for c in contracts)
                     max_price = max(c["price"] for c in contracts)
-
                     cheapest_ids = [c["id"] for c in contracts if c["price"] == min_price]
 
+                    # Vote on the best classification: prefer non-zero type_id
+                    # and non-99 class_weight. Use the most common valid pair.
+                    valid = [
+                        (c["type_id"], c["class_weight"])
+                        for c in contracts
+                        if c["type_id"] > 0 and c["class_weight"] != 99
+                    ]
+                    if valid:
+                        best_type_id, best_class_weight = Counter(valid).most_common(1)[0][0]
+                    else:
+                        best_type_id = 0
+                        best_class_weight = 99
+
                     export_data.append({
-                        "title": key[0],
-                        "type_id": key[1],
-                        "class_weight": key[2],
+                        "title": title,
+                        "type_id": best_type_id,
+                        "class_weight": best_class_weight,
                         "stock": len(contracts),
                         "min_price": min_price,
                         "max_price": max_price,

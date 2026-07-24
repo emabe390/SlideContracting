@@ -514,6 +514,10 @@
                 img.src = imgSrc;
                 img.className = 'card-image';
                 img.alt = row.title;
+                img.onerror = function() {
+                    this.src = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
+                    this.onerror = null;
+                };
                 img.onclick = () => openRandomContract(index);
 
                 const name = document.createElement('div');
