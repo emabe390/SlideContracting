@@ -5,6 +5,7 @@ import traceback
 import json
 import subprocess
 import sys
+from collections import Counter, defaultdict
 import httpx
 
 # --- CONFIGURATION IMPORT ---
@@ -372,48 +373,81 @@ async def scrape_contracts():
                 # --- 7. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
                 c.execute("SELECT title, type_id, class_weight, price, contract_id FROM contracts")
 
-                from collections import Counter
-
-                grouped_contracts = {}
+                # Stage 1: bucket by type_id (unknowns fall back to title)
+                by_type = defaultdict(list)
                 for r in c.fetchall():
                     title, type_id, class_weight, price, contract_id = r
-                    if title not in grouped_contracts:
-                        grouped_contracts[title] = []
-                    grouped_contracts[title].append({
-                        "type_id": type_id,
+                    by_type[type_id].append({
+                        "title": title,
                         "class_weight": class_weight,
                         "price": price,
                         "id": contract_id
                     })
 
                 export_data = []
-                for title, contracts in grouped_contracts.items():
-                    min_price = min(c["price"] for c in contracts)
-                    max_price = max(c["price"] for c in contracts)
-                    cheapest_ids = [c["id"] for c in contracts if c["price"] == min_price]
 
-                    # Vote on the best classification: prefer non-zero type_id
-                    # and non-99 class_weight. Use the most common valid pair.
-                    valid = [
-                        (c["type_id"], c["class_weight"])
-                        for c in contracts
-                        if c["type_id"] > 0 and c["class_weight"] != 99
-                    ]
-                    if valid:
-                        best_type_id, best_class_weight = Counter(valid).most_common(1)[0][0]
+                for type_id, contracts in by_type.items():
+                    if type_id == 0:
+                        # Unknown hull — no type_id to cluster by; fall back to title
+                        by_title = defaultdict(list)
+                        for c in contracts:
+                            by_title[c["title"]].append(c)
+                        for title, group in by_title.items():
+                            min_price = min(c["price"] for c in group)
+                            max_price = max(c["price"] for c in group)
+                            cheapest_ids = [c["id"] for c in group if c["price"] == min_price]
+                            export_data.append({
+                                "title": title,
+                                "type_id": 0,
+                                "class_weight": 99,
+                                "stock": len(group),
+                                "min_price": min_price,
+                                "max_price": max_price,
+                                "cheapest_ids": cheapest_ids
+                            })
                     else:
-                        best_type_id = 0
-                        best_class_weight = 99
+                        # Known hull — cluster by title substring similarity.
+                        # Two titles merge if one is a substring of the other (case-insensitive).
+                        clusters = []
+                        for c in contracts:
+                            norm = c["title"].strip().lower()
+                            placed = False
+                            for cluster in clusters:
+                                rep = cluster[0]["_norm"]
+                                if norm in rep or rep in norm:
+                                    cluster.append({**c, "_norm": norm})
+                                    placed = True
+                                    break
+                            if not placed:
+                                clusters.append([{**c, "_norm": norm}])
 
-                    export_data.append({
-                        "title": title,
-                        "type_id": best_type_id,
-                        "class_weight": best_class_weight,
-                        "stock": len(contracts),
-                        "min_price": min_price,
-                        "max_price": max_price,
-                        "cheapest_ids": cheapest_ids
-                    })
+                        for cluster in clusters:
+                            # Canonical title = most common; longest as tiebreaker
+                            title_counts = Counter(c["title"] for c in cluster)
+                            canonical = sorted(
+                                title_counts.items(),
+                                key=lambda kv: (-kv[1], -len(kv[0]))
+                            )[0][0]
+
+                            # Vote on class_weight (prefer non-99)
+                            wts = Counter(
+                                c["class_weight"] for c in cluster if c["class_weight"] != 99
+                            )
+                            best_weight = wts.most_common(1)[0][0] if wts else 99
+
+                            min_price = min(c["price"] for c in cluster)
+                            max_price = max(c["price"] for c in cluster)
+                            cheapest_ids = [c["id"] for c in cluster if c["price"] == min_price]
+
+                            export_data.append({
+                                "title": canonical,
+                                "type_id": type_id,
+                                "class_weight": best_weight,
+                                "stock": len(cluster),
+                                "min_price": min_price,
+                                "max_price": max_price,
+                                "cheapest_ids": cheapest_ids
+                            })
 
                 output = {
                     "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
