@@ -24,6 +24,13 @@ from configuration import (
 TYPE_CACHE = {}
 GROUP_CACHE = {}  # {group_id: (category_id, name)}
 
+# Meta cache: stores {type_id: {"market_group_id": int, "faction_corp_id": int or None}}
+TYPE_META_CACHE = {}
+# Market group cache: {group_id: {"name": str, "parent_group_id": int or None}}
+MARKET_GROUP_CACHE = {}
+# Faction name → corporation_id: built once from /universe/factions/
+FACTION_CORP_CACHE = {}
+
 # --- DATABASE SETUP ---
 def init_db():
     conn = sqlite3.connect("contracts.db")
@@ -167,6 +174,8 @@ async def resolve_item_type(type_id, client: httpx.AsyncClient):
         type_data = res_type.json()
         group_id = type_data.get("group_id")
         race_id = type_data.get("race_id")
+        market_group_id = type_data.get("market_group_id")
+        TYPE_META_CACHE[type_id] = {"market_group_id": market_group_id, "faction_corp_id": None}
 
         if group_id in SHIP_GROUPS:
             weight = SHIP_GROUPS[group_id]
@@ -230,6 +239,85 @@ async def fetch_contract_items(client: httpx.AsyncClient, corp_id, contract_id, 
         except Exception:
             return None
     return all_items
+
+
+async def build_faction_cache(client: httpx.AsyncClient):
+    """Build a mapping of faction names → corporation_id from ESI."""
+    if FACTION_CORP_CACHE:
+        return
+    try:
+        res = await esi_get_with_retry(client, "https://esi.evetech.net/latest/universe/factions/")
+        if res.status_code == 200:
+            for f in res.json():
+                name = f.get("name", "").strip().lower()
+                corp_id = f.get("corporation_id")
+                if name and corp_id:
+                    FACTION_CORP_CACHE[name] = corp_id
+            # Add short-name aliases (e.g. "gallente" → Gallente Federation corp)
+            aliases = {}
+            for full_name, corp_id in list(FACTION_CORP_CACHE.items()):
+                short = full_name.split()[0]
+                if short and short not in FACTION_CORP_CACHE:
+                    aliases[short] = corp_id
+            FACTION_CORP_CACHE.update(aliases)
+    except Exception as e:
+        print(f"[WARNING] Failed to build faction cache: {e}")
+
+
+async def resolve_type_faction(type_id, client: httpx.AsyncClient):
+    """Walk the market group tree to find a ship's faction corporation_id."""
+    meta = TYPE_META_CACHE.get(type_id, {})
+    if meta.get("faction_corp_id") is not None:
+        return meta["faction_corp_id"]
+
+    market_group_id = meta.get("market_group_id")
+    if market_group_id is None:
+        res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/universe/types/{type_id}/")
+        if res.status_code == 200:
+            market_group_id = res.json().get("market_group_id")
+            TYPE_META_CACHE[type_id] = {"market_group_id": market_group_id, "faction_corp_id": None}
+        else:
+            TYPE_META_CACHE[type_id] = {"market_group_id": None, "faction_corp_id": None}
+            return None
+
+    if not market_group_id:
+        TYPE_META_CACHE[type_id]["faction_corp_id"] = None
+        return None
+
+    if not FACTION_CORP_CACHE:
+        await build_faction_cache(client)
+
+    mgid = market_group_id
+    while mgid:
+        if mgid in MARKET_GROUP_CACHE:
+            mg_data = MARKET_GROUP_CACHE[mgid]
+        else:
+            res = await esi_get_with_retry(client, f"https://esi.evetech.net/latest/markets/groups/{mgid}/")
+            if res.status_code == 200:
+                data = res.json()
+                mg_data = {"name": data.get("name", ""), "parent_group_id": data.get("parent_group_id")}
+                MARKET_GROUP_CACHE[mgid] = mg_data
+            else:
+                break
+
+        mg_name = mg_data.get("name", "").strip().lower()
+
+        # Direct match
+        if mg_name in FACTION_CORP_CACHE:
+            corp_id = FACTION_CORP_CACHE[mg_name]
+            TYPE_META_CACHE[type_id]["faction_corp_id"] = corp_id
+            return corp_id
+
+        # Substring match (e.g. "gallente" inside "gallente federation")
+        for faction_name, corp_id in FACTION_CORP_CACHE.items():
+            if mg_name in faction_name or faction_name in mg_name:
+                TYPE_META_CACHE[type_id]["faction_corp_id"] = corp_id
+                return corp_id
+
+        mgid = mg_data.get("parent_group_id")
+
+    TYPE_META_CACHE[type_id]["faction_corp_id"] = None
+    return None
 
 
 async def classify_contract(client, corp_id, contract_id, headers, active_contracts):
@@ -381,21 +469,27 @@ async def scrape_contracts():
                 conn.commit()
 
                 # --- 7. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
-                c.execute("SELECT title, type_id, class_weight, price, contract_id, race_id FROM contracts")
+                c.execute("SELECT title, type_id, class_weight, price, contract_id FROM contracts")
 
                 # Stage 1: bucket by type_id (unknowns fall back to title)
                 by_type = defaultdict(list)
                 for r in c.fetchall():
-                    title, type_id, class_weight, price, contract_id, race_id = r
+                    title, type_id, class_weight, price, contract_id = r
                     by_type[type_id].append({
                         "title": title,
                         "class_weight": class_weight,
                         "price": price,
-                        "id": contract_id,
-                        "race_id": race_id
+                        "id": contract_id
                     })
 
                 export_data = []
+
+                # Pre-resolve faction for every unique known type_id
+                known_type_ids = [tid for tid in by_type.keys() if tid > 0]
+                type_factions = {}
+                for tid in known_type_ids:
+                    corp_id = await resolve_type_faction(tid, client)
+                    type_factions[tid] = corp_id
 
                 # Sort type_ids for deterministic iteration
                 for type_id in sorted(by_type.keys()):
@@ -411,12 +505,11 @@ async def scrape_contracts():
                             min_price = min(c["price"] for c in group)
                             max_price = max(c["price"] for c in group)
                             cheapest_ids = sorted(c["id"] for c in group if c["price"] == min_price)
-                            first_race = next((c["race_id"] for c in group if c.get("race_id")), None)
                             export_data.append({
                                 "title": title,
                                 "type_id": 0,
                                 "class_weight": 99,
-                                "race_id": first_race,
+                                "faction_corp_id": None,
                                 "stock": len(group),
                                 "min_price": min_price,
                                 "max_price": max_price,
@@ -455,13 +548,13 @@ async def scrape_contracts():
                             min_price = min(c["price"] for c in cluster)
                             max_price = max(c["price"] for c in cluster)
                             cheapest_ids = sorted(c["id"] for c in cluster if c["price"] == min_price)
-                            first_race = next((c["race_id"] for c in cluster if c.get("race_id")), None)
+                            faction_corp_id = type_factions.get(type_id)
 
                             export_data.append({
                                 "title": canonical,
                                 "type_id": type_id,
                                 "class_weight": best_weight,
-                                "race_id": first_race,
+                                "faction_corp_id": faction_corp_id,
                                 "stock": len(cluster),
                                 "min_price": min_price,
                                 "max_price": max_price,

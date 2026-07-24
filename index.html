@@ -528,9 +528,9 @@
                 const imgWrapper = document.createElement('div');
                 imgWrapper.className = 'card-image-wrapper';
 
-                if (row.race_id && row.race_id > 0) {
+                if (row.faction_corp_id && row.faction_corp_id > 0) {
                     const logo = document.createElement('img');
-                    logo.src = `https://images.evetech.net/races/${row.race_id}/logo?size=32`;
+                    logo.src = `https://images.evetech.net/corporations/${row.faction_corp_id}/logo?size=32`;
                     logo.className = 'faction-logo';
                     logo.alt = '';
                     logo.onerror = function() { this.style.display = 'none'; };
