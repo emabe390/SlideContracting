@@ -214,7 +214,7 @@
                 const minPriceStr = row.min_price.toLocaleString() + " ISK";
                 const maxPriceStr = row.max_price.toLocaleString() + " ISK";
                 const imgSrc = row.type_id > 0 ? `https://images.evetech.net/types/${row.type_id}/icon?size=32` : 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
-                const classNames = {1: "Frigate", 2: "Destroyer", 3: "Cruiser", 4: "Battlecruiser", 5: "Battleship", 6: "Capital", 99: "Unknown"};
+                const classNames = {1: "Frigate", 2: "Destroyer", 3: "Cruiser", 4: "Battlecruiser", 5: "Battleship", 6: "Capital", 7: "Industrial", 99: "Unknown"};
                 const hullClass = classNames[row.class_weight] || "Unknown";
 
                 tr.innerHTML = `
