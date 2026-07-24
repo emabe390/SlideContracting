@@ -19,7 +19,7 @@ from configuration import (
 )
 
 # --- LOCAL CACHE ---
-# Stores {type_id: (is_ship_boolean, class_weight)} so we don't spam ESI
+# Stores {type_id: (is_ship_boolean, class_weight, race_id)} so we don't spam ESI
 TYPE_CACHE = {}
 GROUP_CACHE = {}  # {group_id: (category_id, name)}
 
@@ -28,7 +28,12 @@ def init_db():
     conn = sqlite3.connect("contracts.db")
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS contracts 
-                 (contract_id INTEGER PRIMARY KEY, title TEXT, price REAL, issuer_id INTEGER, type_id INTEGER, class_weight INTEGER)''')
+                 (contract_id INTEGER PRIMARY KEY, title TEXT, price REAL, 
+                  issuer_id INTEGER, type_id INTEGER, class_weight INTEGER, race_id INTEGER)''')
+    try:
+        c.execute("ALTER TABLE contracts ADD COLUMN race_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.commit()
     conn.close()
 
@@ -150,38 +155,39 @@ async def resolve_item_type(type_id, client: httpx.AsyncClient):
             f"https://esi.evetech.net/latest/universe/types/{type_id}/"
         )
         if res_type.status_code >= 500:
-            return (False, 99)  # transient, don't cache
+            return (False, 99, None)  # transient, don't cache
         if res_type.status_code == 404:
-            TYPE_CACHE[type_id] = (False, 99)
-            return (False, 99)
+            TYPE_CACHE[type_id] = (False, 99, None)
+            return (False, 99, None)
         if res_type.status_code != 200:
-            TYPE_CACHE[type_id] = (False, 99)
-            return (False, 99)
+            TYPE_CACHE[type_id] = (False, 99, None)
+            return (False, 99, None)
 
         type_data = res_type.json()
         group_id = type_data.get("group_id")
+        race_id = type_data.get("race_id")
 
         if group_id in SHIP_GROUPS:
             weight = SHIP_GROUPS[group_id]
-            TYPE_CACHE[type_id] = (True, weight)
-            return (True, weight)
+            TYPE_CACHE[type_id] = (True, weight, race_id)
+            return (True, weight, race_id)
 
         # Check group cache first
         if group_id in GROUP_CACHE:
             category_id, group_name = GROUP_CACHE[group_id]
             if category_id == 6:
                 weight = derive_weight_from_group_name(group_name)
-                TYPE_CACHE[type_id] = (True, weight)
-                return (True, weight)
-            TYPE_CACHE[type_id] = (False, 99)
-            return (False, 99)
+                TYPE_CACHE[type_id] = (True, weight, race_id)
+                return (True, weight, race_id)
+            TYPE_CACHE[type_id] = (False, 99, race_id)
+            return (False, 99, race_id)
 
         res_group = await esi_get_with_retry(
             client,
             f"https://esi.evetech.net/latest/universe/groups/{group_id}/"
         )
         if res_group.status_code >= 500:
-            return (False, 99)
+            return (False, 99, race_id)
         if res_group.status_code == 200:
             gdata = res_group.json()
             category_id = gdata.get("category_id")
@@ -189,14 +195,14 @@ async def resolve_item_type(type_id, client: httpx.AsyncClient):
             GROUP_CACHE[group_id] = (category_id, group_name)
             if category_id == 6:
                 weight = derive_weight_from_group_name(group_name)
-                TYPE_CACHE[type_id] = (True, weight)
-                return (True, weight)
+                TYPE_CACHE[type_id] = (True, weight, race_id)
+                return (True, weight, race_id)
 
-        TYPE_CACHE[type_id] = (False, 99)
-        return (False, 99)
+        TYPE_CACHE[type_id] = (False, 99, race_id)
+        return (False, 99, race_id)
 
     except Exception:
-        return (False, 99)
+        return (False, 99, None)
 
 
 async def fetch_contract_items(client: httpx.AsyncClient, corp_id, contract_id, headers):
@@ -236,6 +242,7 @@ async def classify_contract(client, corp_id, contract_id, headers, active_contra
 
     ship_type_id = 0
     class_weight = 99
+    race_id = None
     fallback_candidate = 0
 
     if items is not None:
@@ -249,16 +256,18 @@ async def classify_contract(client, corp_id, contract_id, headers, active_contra
             if fallback_candidate == 0:
                 fallback_candidate = tid
 
-            is_ship, weight = await resolve_item_type(tid, client)
+            is_ship, weight, rid = await resolve_item_type(tid, client)
             if is_ship:
                 ship_type_id = tid
                 class_weight = weight
+                race_id = rid
                 break
 
     if ship_type_id == 0 and fallback_candidate > 0:
         ship_type_id = fallback_candidate
+        _, _, race_id = await resolve_item_type(fallback_candidate, client)
 
-    return (contract_id, title, price, issuer_id, ship_type_id, class_weight)
+    return (contract_id, title, price, issuer_id, ship_type_id, class_weight, race_id)
 
 
 # --- BACKGROUND SCRAPER ENGINE ---
@@ -341,13 +350,13 @@ async def scrape_contracts():
                         if c_id in existing_ids:
                             # UPDATE existing record
                             c.execute(
-                                "UPDATE contracts SET title=?, price=?, issuer_id=?, type_id=?, class_weight=? WHERE contract_id=?",
-                                (row[1], row[2], row[3], row[4], row[5], row[0])
+                                "UPDATE contracts SET title=?, price=?, issuer_id=?, type_id=?, class_weight=?, race_id=? WHERE contract_id=?",
+                                (row[1], row[2], row[3], row[4], row[5], row[6], row[0])
                             )
                         else:
                             # INSERT new record
                             c.execute(
-                                "INSERT INTO contracts VALUES (?, ?, ?, ?, ?, ?)",
+                                "INSERT INTO contracts VALUES (?, ?, ?, ?, ?, ?, ?)",
                                 row
                             )
 
@@ -355,8 +364,8 @@ async def scrape_contracts():
                         # sibling contracts with the same title that are still unknown.
                         if row[4] > 0 and row[5] != 99:
                             c.execute(
-                                "UPDATE contracts SET type_id=?, class_weight=? WHERE title=? AND (type_id=0 OR class_weight=99)",
-                                (row[4], row[5], row[1])
+                                "UPDATE contracts SET type_id=?, class_weight=?, race_id=? WHERE title=? AND (type_id=0 OR class_weight=99)",
+                                (row[4], row[5], row[6], row[1])
                             )
                             healed = c.rowcount
                             if healed > 0:
@@ -371,17 +380,18 @@ async def scrape_contracts():
                 conn.commit()
 
                 # --- 7. EXPORT ENTIRE DATABASE TO JSON AND PUSH ---
-                c.execute("SELECT title, type_id, class_weight, price, contract_id FROM contracts")
+                c.execute("SELECT title, type_id, class_weight, price, contract_id, race_id FROM contracts")
 
                 # Stage 1: bucket by type_id (unknowns fall back to title)
                 by_type = defaultdict(list)
                 for r in c.fetchall():
-                    title, type_id, class_weight, price, contract_id = r
+                    title, type_id, class_weight, price, contract_id, race_id = r
                     by_type[type_id].append({
                         "title": title,
                         "class_weight": class_weight,
                         "price": price,
-                        "id": contract_id
+                        "id": contract_id,
+                        "race_id": race_id
                     })
 
                 export_data = []
@@ -396,10 +406,12 @@ async def scrape_contracts():
                             min_price = min(c["price"] for c in group)
                             max_price = max(c["price"] for c in group)
                             cheapest_ids = [c["id"] for c in group if c["price"] == min_price]
+                            first_race = next((c["race_id"] for c in group if c.get("race_id")), None)
                             export_data.append({
                                 "title": title,
                                 "type_id": 0,
                                 "class_weight": 99,
+                                "race_id": first_race,
                                 "stock": len(group),
                                 "min_price": min_price,
                                 "max_price": max_price,
@@ -438,11 +450,13 @@ async def scrape_contracts():
                             min_price = min(c["price"] for c in cluster)
                             max_price = max(c["price"] for c in cluster)
                             cheapest_ids = [c["id"] for c in cluster if c["price"] == min_price]
+                            first_race = next((c["race_id"] for c in cluster if c.get("race_id")), None)
 
                             export_data.append({
                                 "title": canonical,
                                 "type_id": type_id,
                                 "class_weight": best_weight,
+                                "race_id": first_race,
                                 "stock": len(cluster),
                                 "min_price": min_price,
                                 "max_price": max_price,
