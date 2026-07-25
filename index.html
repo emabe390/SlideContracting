@@ -368,8 +368,8 @@
                 } else if (res.ok) {
                     renderLoggedIn();
                 } else {
-                    // Some other error; leave UI as-is but don't claim logged-in
-                    renderLoginButton();
+                    // Some other error; leave UI as-is
+                    console.warn('Token validation returned', res.status);
                 }
             } catch (e) {
                 // Network error; leave UI as-is
@@ -377,6 +377,12 @@
             }
         }
 
+        // Set initial UI immediately based on stored token, then validate in background
+        if (userToken && userToken !== 'None') {
+            renderLoggedIn();
+        } else {
+            renderLoginButton();
+        }
         validateToken();
 
         // --- PKCE ---
