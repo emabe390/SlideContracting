@@ -342,10 +342,43 @@
         };
 
         // --- AUTH UI ---
-        if (userToken && userToken !== 'None') {
+        function renderLoggedIn() {
             document.getElementById('auth-section').innerHTML =
                 "<span style='color: #00ff00; font-weight: bold;'>Logged In! You can now open contracts.</span>";
         }
+
+        function renderLoginButton() {
+            document.getElementById('auth-section').innerHTML =
+                `<img src="https://web.ccpgamescdn.com/eveonlineassets/developers/eve-sso-login-black-small.png"
+                     class="sso-button-img"
+                     alt="Log in with EVE Online"
+                     onclick="startPkceLogin()">`;
+        }
+
+        async function validateToken() {
+            if (!userToken || userToken === 'None') return;
+            try {
+                const res = await fetch('https://esi.evetech.net/verify/', {
+                    headers: { 'Authorization': `Bearer ${userToken}` }
+                });
+                if (res.status === 401 || res.status === 403) {
+                    // Token expired or revoked
+                    userToken = null;
+                    localStorage.removeItem('eve_token');
+                    renderLoginButton();
+                } else if (res.ok) {
+                    renderLoggedIn();
+                } else {
+                    // Some other error; leave UI as-is but don't claim logged-in
+                    renderLoginButton();
+                }
+            } catch (e) {
+                // Network error; leave UI as-is
+                console.error('Token validation failed:', e);
+            }
+        }
+
+        validateToken();
 
         // --- PKCE ---
         function generateRandomString(length) {
@@ -639,6 +672,14 @@
                 }
             })
             .then(res => {
+                if (res.status === 401) {
+                    // Access token expired / revoked
+                    userToken = null;
+                    localStorage.removeItem('eve_token');
+                    renderLoginButton();
+                    alert('Your session has timed out. Please log in again.');
+                    return;
+                }
                 if (res.status !== 204) {
                     return res.json().then(errData => {
                         alert('Failed to open window. ESI Error: ' + (errData.error || res.status));
