@@ -263,6 +263,35 @@
             padding: 40px;
             font-size: 1.1rem;
         }
+
+        /* ---- Slide Services cross-link strip ---- */
+        .slide-strip {
+            --strip-bg: #222; --strip-border: #444; --strip-accent: #007bff;
+            --strip-fg: #fff; --strip-sub: #aaa; --strip-label-fg: #888;
+            display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.75rem;
+            max-width: 1200px; margin: 0 auto 20px; padding: 0.25rem 0 0;
+        }
+        .slide-strip-label {
+            flex: 0 0 auto; align-self: center; writing-mode: vertical-rl;
+            transform: rotate(180deg); font-size: 0.62rem; font-weight: 700;
+            letter-spacing: 0.14em; text-transform: uppercase;
+            color: var(--strip-label-fg); padding: 0 2px; user-select: none;
+        }
+        .slide-strip-card {
+            flex: 1 1 0; min-width: 15rem; display: flex; flex-direction: column;
+            gap: 0.2rem; padding: 0.7rem 0.9rem; background: var(--strip-bg);
+            border: 1px solid var(--strip-border); border-radius: 10px;
+            text-decoration: none; transition: border-color 0.15s ease, transform 0.05s ease;
+        }
+        .slide-strip-card:hover { border-color: var(--strip-accent); transform: translateY(-1px); }
+        .slide-strip-card:active { transform: translateY(0); }
+        .slide-strip-card strong { color: var(--strip-fg); font-size: 0.95rem; line-height: 1.2; }
+        .slide-strip-card span { color: var(--strip-sub); font-size: 0.8rem; line-height: 1.35; }
+        @media (max-width: 640px) {
+            .slide-strip { flex-direction: column; margin-bottom: 1rem; }
+            .slide-strip-label { writing-mode: horizontal-tb; transform: none; text-align: center; padding: 0; }
+            .slide-strip-card { min-width: 0; }
+        }
     </style>
 </head>
 <body>
@@ -305,6 +334,19 @@
             <div class="last-updated" id="last-updated"></div>
         </div>
     </div>
+
+    <!-- CROSS-LINKS: other Slide services (keep in sync with _shared/slide-services-strip) -->
+    <section class="slide-strip" aria-label="Other Slide services">
+        <span class="slide-strip-label">Slide Services</span>
+        <a class="slide-strip-card" href="https://emabe390.github.io/AssetLister/">
+            <strong>Hull Stock</strong>
+            <span>Just want the hull? Browse packaged hull stock at Dal 6.</span>
+        </a>
+        <a class="slide-strip-card" href="https://emabe390.github.io/AltruismUnitedHauling/">
+            <strong>Hauling</strong>
+            <span>Cargo to move after the fit? JF hauling Jita ↔ Hed for Slide on Contact.</span>
+        </a>
+    </section>
 
     <div class="card-grid" id="contract-grid">
         <!-- Cards injected here -->
