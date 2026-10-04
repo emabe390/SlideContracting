@@ -2,4 +2,6 @@ configuration.py
 __pycache__
 venv
 contracts.db
+standard_fits/invTypes.csv
+standard_fits/invTypes.csv.tmp
 DEPLOYMENT.md

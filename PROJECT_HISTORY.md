@@ -80,6 +80,19 @@ A headless EVE Online contract scraper + GitHub Pages frontend that displays all
 - Type names cached in `TYPE_META_CACHE` (`resolve_item_type` / `resolve_type_tech_level` already fetch the type endpoint; `get_type_name()` reuses the cache)
 - Hardened the titleless case downstream: heal-by-title only applies when the title is non-empty (a titleless hull is not proof of its siblings' identity), and title-similarity clustering ignores empty norms so unnamed contracts cluster by hull instead of merging into the first sibling
 
+### 8. Standard Fits: Canonical Names for Exact-Match Contracts
+
+**Problem:** The same doctrine fit gets posted under many user-chosen titles, so one fit can appear on the board under several names.
+
+**Fixes:**
+- `standard_fits/` folder holds one `.eft` per standard fit (standard EVE fit export format: `[Ship, Fit Name]` header + item lines, `xN` quantities)
+- If a contract's items **100% match** a stored fit (hull + every item, exact per-item totals), its title is replaced with the fit name from the first line of the `.eft` file — the user's contract title is ignored (see `standard_fits/README.md`)
+- Matching compares name multisets: contract items are mapped type_id → display name, and the resulting `Counter` must equal the fit's expected `Counter`. Any unknown type_id aborts the match (keeps user title)
+- Item-name → type-ID translation uses the fuzzwork `invTypes.csv` dump instead of hammering ESI per name: auto-downloaded on first run, refreshed when older than a week, streamed to a temp file + atomic replace, old file kept on failure, git-ignored
+- Matching is by total per item name, so split stacks (2×500 vs 1×1000) still count as a 100% match — consistent with the EFT format, which has no stack concept
+- New `fit_version` DB column = SHA-1 digest of the fit library; when fits are added/edited and pulled, all live contracts are re-evaluated (cap raised from 50 to 200/cycle) so already-listed contracts get renamed automatically
+- EFT header parsing: ship name before the first comma (hull, qty 1), fit name after; item lines parsed with optional `xN` suffix, duplicate lines summed
+
 ---
 
 ## Architecture
@@ -95,6 +108,7 @@ GitHub Pages (browser)                              GitHub repo
 
 **Key files:**
 - `main.py` — scraper, classifier, exporter, git sync
+- `standard_fits/` — one `.eft` per standard fit + auto-managed `invTypes.csv` (fuzzwork dump, weekly refresh)
 - `index.html` — card grid frontend, SSO login, ESI window opener
 - `configuration.py` — secrets (ignored by git)
 - `contracts.json` — generated data with `{"updated_at", "contracts": [...]}`
@@ -113,6 +127,7 @@ GitHub Pages (browser)                              GitHub repo
 | `GET /markets/groups/{id}/` | Walk market tree for faction detection |
 | `POST /ui/openwindow/contract/` | Open contract in-game (frontend) |
 | `POST /v2/oauth/token` | PKCE token exchange (frontend) |
+| `GET fuzzwork.co.uk/dump/latest/csv/invTypes.csv` | Full type dump: item names → type_ids for standard-fit matching (weekly) |
 
 ---
 

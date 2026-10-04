@@ -1,7 +1,11 @@
 import asyncio
+import csv
 import datetime
+import hashlib
 import os
+import re
 import sqlite3
+import time
 import traceback
 import json
 import subprocess
@@ -60,9 +64,14 @@ def init_db():
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS contracts 
                  (contract_id INTEGER PRIMARY KEY, title TEXT, price REAL, 
-                  issuer_id INTEGER, type_id INTEGER, class_weight INTEGER, race_id INTEGER)''')
+                  issuer_id INTEGER, type_id INTEGER, class_weight INTEGER, race_id INTEGER,
+                  fit_version INTEGER)''')
     try:
         c.execute("ALTER TABLE contracts ADD COLUMN race_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    try:
+        c.execute("ALTER TABLE contracts ADD COLUMN fit_version INTEGER")
     except sqlite3.OperationalError:
         pass  # Column already exists
     conn.commit()
@@ -364,7 +373,197 @@ async def resolve_type_tech_level(type_id, client: httpx.AsyncClient):
     return "t1"
 
 
-async def classify_contract(client, corp_id, contract_id, headers, active_contracts):
+# --- STANDARD FITS ---
+# standard_fits/*.eft use the standard EVE fit export format:
+#   [Ship Name, Fit Name]
+#   Item One
+#   Item Two x3
+# If a contract's items 100% match a stored fit (hull + every item, exact
+# quantities), the contract is displayed under the fit name from the first
+# line of the .eft file instead of whatever the user titled the contract.
+#
+# Item names are translated via the fuzzwork invTypes.csv dump (downloaded
+# on first run, refreshed weekly) instead of hammering ESI per item name.
+
+STANDARD_FITS_DIR = "standard_fits"
+INV_TYPES_CSV = os.path.join(STANDARD_FITS_DIR, "invTypes.csv")
+INV_TYPES_URL = "https://www.fuzzwork.co.uk/dump/latest/csv/invTypes.csv"
+INV_TYPES_MAX_AGE_DAYS = 7
+
+# In-memory cache of the parsed CSV: {"mtime": float, "map": {type_id: name}}
+INV_TYPES_CACHE = {"mtime": None, "map": {}}
+
+
+async def refresh_inv_types_csv(client: httpx.AsyncClient):
+    """Download the fuzzwork invTypes CSV if missing or older than a week."""
+    try:
+        if os.path.exists(INV_TYPES_CSV):
+            age_days = (time.time() - os.path.getmtime(INV_TYPES_CSV)) / 86400
+            if age_days < INV_TYPES_MAX_AGE_DAYS:
+                return
+            print(f"[STD FITS] invTypes.csv is {age_days:.1f} days old. Refreshing...")
+        else:
+            print("[STD FITS] invTypes.csv not found. Downloading...")
+    except OSError:
+        pass
+
+    tmp_path = INV_TYPES_CSV + ".tmp"
+    last_err = None
+    for attempt in range(3):
+        try:
+            async with client.stream("GET", INV_TYPES_URL, timeout=120.0) as res:
+                if res.status_code != 200:
+                    raise RuntimeError(f"HTTP {res.status_code}")
+                with open(tmp_path, "wb") as f:
+                    async for chunk in res.aiter_bytes(1 << 16):
+                        f.write(chunk)
+            os.replace(tmp_path, INV_TYPES_CSV)  # atomic swap; old file survives failures
+            print("[STD FITS] invTypes.csv refreshed.")
+            return
+        except Exception as e:
+            last_err = e
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            if attempt < 2:
+                await asyncio.sleep(5 * (attempt + 1))
+
+    if os.path.exists(INV_TYPES_CSV):
+        print(f"[STD FITS] Refresh failed ({last_err}). Keeping the existing file.")
+    else:
+        print(f"[STD FITS] Download failed ({last_err}). Standard fit matching is off.")
+
+
+def load_inv_types_name_map() -> dict:
+    """Return {type_id: display_name} from the fuzzwork CSV (cached by mtime)."""
+    try:
+        mtime = os.path.getmtime(INV_TYPES_CSV)
+    except OSError:
+        return INV_TYPES_CACHE["map"]  # empty until first successful download
+    if INV_TYPES_CACHE["map"] and INV_TYPES_CACHE["mtime"] == mtime:
+        return INV_TYPES_CACHE["map"]
+
+    id_to_name = {}
+    try:
+        # utf-8-sig: the dump starts with a BOM; csv module: descriptions
+        # contain embedded newlines, so line-by-line parsing would break
+        with open(INV_TYPES_CSV, "r", encoding="utf-8-sig", newline="") as f:
+            for row in csv.DictReader(f):
+                tid = (row.get("typeID") or "").strip()
+                name = (row.get("typeName") or "").strip()
+                if tid.isdigit() and name:
+                    id_to_name[int(tid)] = name
+    except Exception as e:
+        print(f"[STD FITS] Could not parse invTypes.csv: {e}")
+        return INV_TYPES_CACHE["map"]
+
+    INV_TYPES_CACHE["mtime"] = mtime
+    INV_TYPES_CACHE["map"] = id_to_name
+    print(f"[STD FITS] Loaded type names for {len(id_to_name)} types.")
+    return id_to_name
+
+
+def parse_standard_fits() -> list:
+    """Parse every standard_fits/*.eft into a matching profile.
+
+    Returns [{"file", "fit_name", "expected": Counter{name_lower: qty}}] where
+    "expected" is the fit's items plus the hull itself (qty 1).
+    """
+    fits = []
+    if not os.path.isdir(STANDARD_FITS_DIR):
+        return fits
+
+    for fname in sorted(os.listdir(STANDARD_FITS_DIR)):
+        if not fname.lower().endswith(".eft"):
+            continue
+        path = os.path.join(STANDARD_FITS_DIR, fname)
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                lines = [ln.strip() for ln in f.read().splitlines()]
+        except Exception as e:
+            print(f"[STD FITS] Could not read {fname}: {e}")
+            continue
+
+        # Header must be the first non-empty line: [Ship Name, Fit Name]
+        idx = 0
+        while idx < len(lines) and not lines[idx]:
+            idx += 1
+        if idx >= len(lines):
+            print(f"[STD FITS] Skipping {fname}: file is empty.")
+            continue
+
+        m = re.match(r"^\[(.+)\]$", lines[idx])
+        if not m:
+            print(f"[STD FITS] Skipping {fname}: first line is not '[Ship, Fit Name]'.")
+            continue
+
+        ship_name, _, fit_name = m.group(1).partition(",")
+        ship_name = ship_name.strip()
+        fit_name = fit_name.strip() or ship_name
+
+        expected = Counter()
+        if ship_name:
+            expected[ship_name.lower()] += 1
+
+        for ln in lines[idx + 1:]:
+            if not ln:
+                continue
+            qm = re.search(r"\s+[xX](\d+)$", ln)
+            if qm:
+                name, qty = ln[: qm.start()].strip(), int(qm.group(1))
+            else:
+                name, qty = ln, 1
+            if name:
+                expected[name.lower()] += qty
+
+        if len(expected) == (1 if ship_name else 0):
+            print(f"[STD FITS] Skipping {fname}: no items found.")
+            continue
+
+        fits.append({"file": fname, "fit_name": fit_name, "expected": expected})
+
+    return fits
+
+
+def compute_fit_version(fits) -> int:
+    """Stable integer for the current fit library. Changes whenever any fit's
+    content or the file set changes (used to trigger contract re-evaluation)."""
+    h = hashlib.sha1()
+    for fit in sorted(fits, key=lambda f: f["file"]):
+        h.update(fit["file"].encode("utf-8"))
+        for name, qty in sorted(fit["expected"].items()):
+            h.update(f"{name}:{qty}\n".encode("utf-8"))
+    return int(h.hexdigest()[:12], 16)
+
+
+def match_standard_fit(items, id_to_name, standard_fits):
+    """Return the fit name if the contract's items 100% match a standard fit.
+
+    A match means the exact same multiset of (item name, quantity) as the
+    fit, including the hull itself. If any contract item has an unknown
+    type_id (not in the name map), a 100% match cannot be proven and None
+    is returned (the contract keeps its own title).
+    """
+    if not items or not standard_fits or not id_to_name:
+        return None
+
+    contract_items = Counter()
+    for item in items:
+        name = id_to_name.get(item.get("type_id"))
+        if not name:
+            return None
+        qty = 1 if item.get("is_singleton") else int(item.get("quantity") or 1)
+        contract_items[name.strip().lower()] += qty
+
+    for fit in standard_fits:
+        if contract_items == fit["expected"]:
+            return fit["fit_name"]
+    return None
+
+
+async def classify_contract(client, corp_id, contract_id, headers, active_contracts,
+                            id_to_name=None, standard_fits=None):
     """Classify a single contract and return its DB row tuple."""
     contract = active_contracts[contract_id]
     price = contract["price"]
@@ -400,8 +599,16 @@ async def classify_contract(client, corp_id, contract_id, headers, active_contra
         ship_type_id = fallback_candidate
         _, _, race_id = await resolve_item_type(fallback_candidate, client)
 
-    # Contracts posted without a title/description: display the ship's name instead
-    if not title:
+    # Standard fit check: if the contract 100% matches a stored fit, the
+    # canonical fit name (first line of the .eft file) replaces the user's title
+    fit_name = match_standard_fit(items, id_to_name, standard_fits)
+    if fit_name and fit_name != title:
+        print(f"  [STD FITS] Contract {contract_id} matches standard fit '{fit_name}' (title was {title!r}).")
+
+    if fit_name:
+        title = fit_name
+    elif not title:
+        # Contracts posted without a title/description: display the ship's name instead
         name = await get_type_name(ship_type_id, client)
         title = str(name) if name else ""
 
@@ -428,6 +635,14 @@ async def scrape_contracts():
 
                 headers = {"Authorization": f"Bearer {token}"}
 
+                # Standard fits: keep the fuzzwork name map fresh (weekly) and
+                # re-read the fit library (cheap local files, one pass per cycle)
+                await refresh_inv_types_csv(client)
+                id_to_name = load_inv_types_name_map()
+                standard_fits = parse_standard_fits()
+                fit_version = compute_fit_version(standard_fits)
+                BATCH_SIZE = 200
+
                 # 1. Fetch active contracts
                 url = f"https://esi.evetech.net/latest/corporations/{DIRECTOR_CORPORATION_ID}/contracts/"
                 res = await client.get(url, headers=headers)
@@ -447,7 +662,7 @@ async def scrape_contracts():
                 # 2. Check local database
                 conn = sqlite3.connect("contracts.db")
                 c = conn.cursor()
-                c.execute("SELECT contract_id, type_id, class_weight FROM contracts")
+                c.execute("SELECT contract_id, type_id, class_weight, fit_version FROM contracts")
                 db_rows = c.fetchall()
                 existing_ids = {row[0] for row in db_rows}
                 live_ids = set(active_contracts.keys())
@@ -464,17 +679,24 @@ async def scrape_contracts():
                 print(f"[SCRAPER] Found {len(new_ids)} brand new contracts to evaluate.")
 
                 # 5. Find stale / bad existing contracts to re-evaluate
+                #    (bad classification, or evaluated against an older fit library)
                 bad_existing = [
                     row[0] for row in db_rows
                     if row[0] in live_ids and (row[1] == 0 or row[2] == 99)
                 ]
-                REEVAL_LIMIT = 50
-                ids_to_reeval = bad_existing[:REEVAL_LIMIT]
+                stale_fit_version = [
+                    row[0] for row in db_rows
+                    if row[0] in live_ids and (row[3] or 0) != fit_version
+                ]
+                reeval_candidates = list(dict.fromkeys(bad_existing + stale_fit_version))
+                # A changed fit library warrants a faster full re-check than the usual cap
+                REEVAL_LIMIT = BATCH_SIZE if stale_fit_version else 50
+                ids_to_reeval = reeval_candidates[:REEVAL_LIMIT]
                 if ids_to_reeval:
-                    print(f"[SCRAPER] Re-evaluating {len(ids_to_reeval)} existing contracts with bad classification.")
+                    print(f"[SCRAPER] Re-evaluating {len(ids_to_reeval)} existing contracts "
+                          f"({len(stale_fit_version)} due to standard-fit library changes).")
 
                 # 6. Process batches
-                BATCH_SIZE = 200
                 ids_to_process = new_ids[:BATCH_SIZE]
                 total_to_scan = ids_to_process + ids_to_reeval
 
@@ -482,20 +704,21 @@ async def scrape_contracts():
                     print(f"[SCRAPER] Fetching item details for batch of {len(total_to_scan)} contracts...")
                     for index, c_id in enumerate(total_to_scan, 1):
                         row = await classify_contract(
-                            client, DIRECTOR_CORPORATION_ID, c_id, headers, active_contracts
+                            client, DIRECTOR_CORPORATION_ID, c_id, headers, active_contracts,
+                            id_to_name, standard_fits
                         )
 
                         if c_id in existing_ids:
                             # UPDATE existing record
                             c.execute(
-                                "UPDATE contracts SET title=?, price=?, issuer_id=?, type_id=?, class_weight=?, race_id=? WHERE contract_id=?",
-                                (row[1], row[2], row[3], row[4], row[5], row[6], row[0])
+                                "UPDATE contracts SET title=?, price=?, issuer_id=?, type_id=?, class_weight=?, race_id=?, fit_version=? WHERE contract_id=?",
+                                (row[1], row[2], row[3], row[4], row[5], row[6], fit_version, row[0])
                             )
                         else:
                             # INSERT new record
                             c.execute(
-                                "INSERT INTO contracts VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                row
+                                "INSERT INTO contracts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                row + (fit_version,)
                             )
 
                         # Heal-by-title: if we just got a good classification, fix any
