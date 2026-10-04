@@ -70,6 +70,16 @@ A headless EVE Online contract scraper + GitHub Pages frontend that displays all
 - If `main.py` changed → `os.execv()` restarts the script with new code
 - If data unchanged → skips git add/commit/push entirely
 
+### 7. Titleless Contracts Now Show the Ship Name
+
+**Problem:** Contracts posted with no title/description were silently dropped: the live-contract filter required a truthy `title`, so they never entered the DB or `contracts.json` and never appeared on the website.
+
+**Fixes:**
+- Dropped the `title` requirement from the live-contract filter (`item_exchange` + `outstanding` is enough)
+- `classify_contract()` falls back to the ESI display name of the classified ship type when a contract has no title (e.g. a fitless "Rifter" contract shows as *Rifter*)
+- Type names cached in `TYPE_META_CACHE` (`resolve_item_type` / `resolve_type_tech_level` already fetch the type endpoint; `get_type_name()` reuses the cache)
+- Hardened the titleless case downstream: heal-by-title only applies when the title is non-empty (a titleless hull is not proof of its siblings' identity), and title-similarity clustering ignores empty norms so unnamed contracts cluster by hull instead of merging into the first sibling
+
 ---
 
 ## Architecture

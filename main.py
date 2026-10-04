@@ -202,6 +202,7 @@ async def resolve_item_type(type_id, client: httpx.AsyncClient):
             "market_group_id": market_group_id,
             "group_id": group_id,
             "faction_corp_id": None,
+            "name": type_data.get("name"),
         }
 
         if group_id in SHIP_GROUPS:
@@ -240,6 +241,29 @@ async def resolve_item_type(type_id, client: httpx.AsyncClient):
 
     except Exception:
         return (False, 99, None)
+
+
+async def get_type_name(type_id, client: httpx.AsyncClient):
+    """Return the ESI display name for a type_id (cached), or None if unavailable."""
+    if not type_id:
+        return None
+    meta = TYPE_META_CACHE.get(type_id)
+    if meta and meta.get("name"):
+        return meta["name"]
+    try:
+        res = await esi_get_with_retry(
+            client, f"https://esi.evetech.net/latest/universe/types/{type_id}/"
+        )
+        if res.status_code == 200:
+            name = res.json().get("name")
+            if name:
+                meta = dict(meta) if meta else {}
+                meta["name"] = name
+                TYPE_META_CACHE[type_id] = meta
+                return name
+    except Exception:
+        pass
+    return None
 
 
 async def fetch_contract_items(client: httpx.AsyncClient, corp_id, contract_id, headers):
@@ -290,6 +314,7 @@ async def resolve_type_tech_level(type_id, client: httpx.AsyncClient):
                 "market_group_id": market_group_id,
                 "group_id": group_id,
                 "tech_level": None,
+                "name": data.get("name"),
             }
             TYPE_META_CACHE[type_id] = meta
         else:
@@ -344,7 +369,7 @@ async def classify_contract(client, corp_id, contract_id, headers, active_contra
     contract = active_contracts[contract_id]
     price = contract["price"]
     issuer_id = contract["issuer_id"]
-    title = contract["title"].strip()
+    title = (contract.get("title") or "").strip()
 
     items = await fetch_contract_items(client, corp_id, contract_id, headers)
 
@@ -374,6 +399,11 @@ async def classify_contract(client, corp_id, contract_id, headers, active_contra
     if ship_type_id == 0 and fallback_candidate > 0:
         ship_type_id = fallback_candidate
         _, _, race_id = await resolve_item_type(fallback_candidate, client)
+
+    # Contracts posted without a title/description: display the ship's name instead
+    if not title:
+        name = await get_type_name(ship_type_id, client)
+        title = str(name) if name else ""
 
     return (contract_id, title, price, issuer_id, ship_type_id, class_weight, race_id)
 
@@ -411,7 +441,7 @@ async def scrape_contracts():
                 active_contracts = {
                     c.get("contract_id"): c
                     for c in raw_contracts
-                    if c.get("type") == "item_exchange" and c.get("status") == "outstanding" and c.get("title")
+                    if c.get("type") == "item_exchange" and c.get("status") == "outstanding"
                 }
 
                 # 2. Check local database
@@ -470,7 +500,7 @@ async def scrape_contracts():
 
                         # Heal-by-title: if we just got a good classification, fix any
                         # sibling contracts with the same title that are still unknown.
-                        if row[4] > 0 and row[5] != 99:
+                        if row[1] and row[4] > 0 and row[5] != 99:
                             c.execute(
                                 "UPDATE contracts SET type_id=?, class_weight=?, race_id=? WHERE title=? AND (type_id=0 OR class_weight=99)",
                                 (row[4], row[5], row[6], row[1])
@@ -543,7 +573,7 @@ async def scrape_contracts():
                             placed = False
                             for cluster in clusters:
                                 rep = cluster[0]["_norm"]
-                                if norm in rep or rep in norm:
+                                if norm and rep and (norm in rep or rep in norm):
                                     cluster.append({**c, "_norm": norm})
                                     placed = True
                                     break
